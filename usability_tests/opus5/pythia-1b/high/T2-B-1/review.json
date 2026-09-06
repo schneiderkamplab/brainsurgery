@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/pythia-1b/B/T2-defective.yaml",
+  "started_at": "2026-09-06T00:09:52+00:00",
+  "finished_at": "2026-09-06T00:10:05+00:00",
+  "wall_clock_s": 12.7,
+  "tokens_in": 2,
+  "tokens_out": 852,
+  "cost_usd": 0.16759749999999998,
+  "verdict_text": "NO\n\nThe plan removes head 6 instead of head 5. It keeps `query_key_value` rows `[0:4608]` and `[5376:6144]` \u2014 dropping rows 4608\u20135375, which is head 6's 768-row block \u2014 whereas Required result clauses 1 and 2 require keeping rows `0..3839` and `4608..6143` (dropping head 5's block at 3840\u20134607). The same off-by-one head appears in `attention.dense.weight`: it keeps columns `[0:1536]` and `[1792:2048]`, dropping columns 1536\u20131791 (head 6), while clause 3 requires keeping `0..1279` and `1536..2047` (dropping head 5's columns 1280\u20131535). The plan's own leading comment states its intent as \"remove attention head 6\", confirming this is not a transcription slip in one place. All four required asserts still pass because they only constrain shapes (`[5376, 2048]`, `[5376]`, `[2048, 1792]`, 244 tensors), which the wrong-head slicing also satisfies, so the run would succeed while producing a checkpoint that fails the bit-exact grading.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The removed head is off by one (head N+1 instead of head N). All shapes are still correct, so the artifact's own shape checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

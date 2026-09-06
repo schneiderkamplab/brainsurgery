@@ -1,0 +1,21 @@
+# Verification only (not the solution plan): compares out/T5 against the base.
+inputs:
+  - base::inputs/base/model.safetensors
+  - out::out/T5
+
+transforms:
+  - assert: { count: { of: 'out::.*', is: 160 } }
+  - assert: { not: { exists: 'out::.*lora_.*' } }
+  # every tensor outside h.<i>.attn.c_attn.weight is bit-identical to the base
+  - assert:
+      equal:
+        left: 'base::(?!h\.\d+\.attn\.c_attn\.weight$).+'
+        right: 'out::\g<0>'
+  # the 12 adapted weights did change
+  - assert:
+      not:
+        equal:
+          left: 'base::h\.(\d+)\.attn\.c_attn\.weight'
+          right: 'out::h.\1.attn.c_attn.weight'
+  - assert: { shape: { of: 'out::h\.(\d+)\.attn\.c_attn\.weight', is: [768, 2304] } }
+  - assert: { dtype: { of: 'out::h\.(\d+)\.attn\.c_attn\.weight', is: float32 } }

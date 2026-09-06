@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/B/T5-defective.yaml",
+  "started_at": "2026-09-05T23:48:55+00:00",
+  "finished_at": "2026-09-05T23:49:06+00:00",
+  "wall_clock_s": 10.7,
+  "tokens_in": 2,
+  "tokens_out": 699,
+  "cost_usd": 0.1082395,
+  "verdict_text": "NO\n\nThe plan never applies the LoRA scaling factor `alpha / r = 2`: it computes `delta = (B @ A).T` via `matmul` + `permute` and adds it directly with `add_`, with no `scale`/multiply step (the plan's own comment marks this as the defect). This violates \"Required result\" clause 1, which requires `h.<i>.<module>.weight += scale * (B @ A).T` with `scale = 2`, so every merged weight is off by a factor-of-two-too-small delta and will exceed the 1e-5 relative Frobenius tolerance in grading. Everything else \u2014 adapter-to-base name mapping, the `fan_in_fan_out` transpose, deletion of the `delta`/`delta_t` intermediates, and the four required asserts \u2014 matches the specification. One secondary risk: the spec's shard limit is 100 MiB (104,857,600 bytes) while the plan writes `shard: 100MB`, which is only correct if the tool interprets `MB` as `2^20` bytes.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The adapter scaling factor alpha / r is missing: the raw low-rank product is added.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

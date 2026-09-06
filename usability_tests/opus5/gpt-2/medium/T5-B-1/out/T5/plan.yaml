@@ -1,0 +1,72 @@
+# T5: merge a PEFT LoRA adapter (r=16, alpha=32, fan_in_fan_out=true) into the
+# GPT-2 base weights and write the result as a sharded safetensors checkpoint.
+#
+#   base h.<i>.attn.c_attn.weight  : [768, 2304]  (Conv1D layout [in, out])
+#   lora_A                         : [16, 768]
+#   lora_B                         : [2304, 16]
+#   merged = base + (alpha/r) * (B @ A).T = base + 2 * (B @ A).T
+#
+# All temporaries are created on the `base` alias (so the output alias stays
+# unambiguous) under the `tmp_merge.` prefix and are deleted before writing.
+
+inputs:
+  - base::inputs/base/model.safetensors
+  - lora::inputs/lora/adapter_model.safetensors
+
+transforms:
+  # --- required check 1: exactly 12 adapter pairs -------------------------
+  - assert:
+      all:
+        - count: { of: 'lora::base_model\.model\.h\.\d+\.attn\.c_attn\.lora_A\.weight', is: 12 }
+        - count: { of: 'lora::base_model\.model\.h\.\d+\.attn\.c_attn\.lora_B\.weight', is: 12 }
+        - count: { of: 'lora::.*', is: 24 }
+        - shape: { of: 'lora::base_model\.model\.h\.0\.attn\.c_attn\.lora_A\.weight', is: [16, 768] }
+        - shape: { of: 'lora::base_model\.model\.h\.0\.attn\.c_attn\.lora_B\.weight', is: [2304, 16] }
+        - dtype: { of: 'lora::.*', is: float32 }
+        - count: { of: 'base::.*', is: 160 }
+        - dtype: { of: 'base::h\.\d+\.attn\.c_attn\.weight', is: float32 }
+
+  # --- delta = B @ A   -> [2304, 768] ------------------------------------
+  - matmul:
+      from_a: 'lora::base_model\.model\.h\.(\d+)\.attn\.c_attn\.lora_B\.weight'
+      from_b: 'lora::base_model.model.h.\1.attn.c_attn.lora_A.weight'
+      to: 'base::tmp_merge.\1.ba'
+  - assert:
+      all:
+        - count: { of: 'base::tmp_merge\.\d+\.ba', is: 12 }
+        - shape: { of: 'base::tmp_merge\.0\.ba', is: [2304, 768] }
+
+  # --- scale by alpha / r = 32 / 16 = 2 ----------------------------------
+  - scale_: { target: 'base::tmp_merge\.\d+\.ba', by: 2.0 }
+
+  # --- transpose (fan_in_fan_out) -> [768, 2304] -------------------------
+  - permute:
+      from: 'base::tmp_merge\.(\d+)\.ba'
+      to: 'base::tmp_merge.\1.bat'
+      order: [1, 0]
+  - assert:
+      all:
+        - count: { of: 'base::tmp_merge\.\d+\.bat', is: 12 }
+        - shape: { of: 'base::tmp_merge\.0\.bat', is: [768, 2304] }
+
+  # --- base += delta.T ---------------------------------------------------
+  - add_:
+      from: 'base::tmp_merge\.(\d+)\.bat'
+      to: 'base::h.\1.attn.c_attn.weight'
+
+  # --- drop every temporary ----------------------------------------------
+  - delete: { target: 'base::tmp_merge\..*' }
+
+  # --- required checks 2-4, on the final state ---------------------------
+  - assert:
+      all:
+        - not: { exists: 'base::.*lora_.*' }
+        - not: { exists: 'base::tmp_merge\..*' }
+        - shape: { of: 'base::h\.0\.attn\.c_attn\.weight', is: [768, 2304] }
+        - dtype: { of: 'base::h\.\d+\.attn\.c_attn\.weight', is: float32 }
+        - count: { of: 'base::.*', is: 160 }
+
+output:
+  path: out/T5
+  format: safetensors
+  shard: 100MB

@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/B/T1-defective.yaml",
+  "started_at": "2026-09-06T01:57:35+00:00",
+  "finished_at": "2026-09-06T01:57:42+00:00",
+  "wall_clock_s": 7.2,
+  "tokens_in": 2,
+  "tokens_out": 314,
+  "cost_usd": 0.186055,
+  "verdict_text": "NO\n\nThe plan deletes blocks 2, 5 and 9 instead of blocks 2, 5 and 8, violating \"Required result\" clause 1. As a consequence the renumbering is also wrong under clause 2: old block 8 survives and is moved to index 6, while old block 9, which should become index 6, is deleted. The final checkpoint has the right count of 121 tensors and 9 blocks, so all three \"Required checks\" asserts pass and the error is not caught loudly, which is exactly the silent-wrong outcome the task warns about. The grader would reject it because block 6 holds the wrong values.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The drop set is off by one: the last dropped block is the one after the specified block (for example blocks 2, 5, 9 instead of 2, 5, 8). Block counts still match, so the artifact's own checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

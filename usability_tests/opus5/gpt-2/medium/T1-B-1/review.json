@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/B/T1-defective.yaml",
+  "started_at": "2026-09-05T23:08:51+00:00",
+  "finished_at": "2026-09-05T23:09:03+00:00",
+  "wall_clock_s": 12.3,
+  "tokens_in": 2,
+  "tokens_out": 736,
+  "cost_usd": 0.1057355,
+  "verdict_text": "NO\n\nThe plan deletes blocks 2, 5, and **9** (`h\\.(2|5|9)\\..*`) instead of blocks 2, 5, and **8**, violating \"Required result\" clause 1. Consequently its renumbering maps old 8\u21926, old 10\u21927, old 11\u21928, whereas clause 2 requires old 9\u21926, old 10\u21927, old 11\u21928; every tensor of the third surviving group is therefore wrong (block 8's weights sit where block 9's should be, and block 9's weights are gone). The comment at the top of the plan states the intent as \"remove blocks 2, 5, 9\", so this is a consistent misreading rather than a typo in one line. All three required checks still pass \u2014 39 deleted tensors, no `h.9/10/11` remaining, 9 `c_attn.weight` matches, 121 total \u2014 so the plan exits zero and writes a silently wrong checkpoint, exactly the failure mode the specification's rationale warns about; grading against the hidden reference will fail on values for blocks 6\u20138.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The drop set is off by one: the last dropped block is the one after the specified block (for example blocks 2, 5, 9 instead of 2, 5, 8). Block counts still match, so the artifact's own checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

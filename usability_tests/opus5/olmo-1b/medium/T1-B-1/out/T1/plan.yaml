@@ -1,0 +1,137 @@
+# T1: depth pruning of OLMo-1B-0724-hf (16 blocks -> 12 blocks).
+#
+# Drop blocks 2, 6, 10, 14 and renumber the survivors so that the block
+# indices are contiguous 0..11 again.
+#
+# Collision safety: the four dropped blocks are deleted *first*, then the
+# survivors are moved in ascending order of their old index. Each destination
+# index is therefore always free at the moment of the move -- it was either
+# freed by one of the deletes (2, 6, 10) or vacated by the immediately
+# preceding move. `move` also refuses to overwrite an existing destination,
+# so a mistake in the order would abort the run rather than silently clobber
+# a surviving block.
+
+inputs:
+  # 'model' is the alias that gets edited and written out. 'ref' is a second,
+  # read-only copy of the same checkpoint, used at the end to prove that every
+  # renumbered block really carries the values of the block it came from.
+  # Only 'model' is ever written to, so the output alias stays unambiguous.
+  - model::inputs/base
+  - ref::inputs/base
+
+output:
+  path: out/T1/model.safetensors
+  format: safetensors
+
+transforms:
+  # ---------------------------------------------------------------- preflight
+  # The plan below assumes exactly the documented 16-block layout.
+  - assert: { count: { of: 'model::.*', is: 114 } }
+  - assert: { count: { of: 'model::model\.layers\.\d+\.self_attn\.q_proj\.weight', is: 16 } }
+  - assert: { count: { of: 'model::model\.layers\.\d+\..*', is: 112 } }
+  - assert: { exists: 'model::model\.embed_tokens\.weight' }
+  - assert: { exists: 'model::lm_head\.weight' }
+  - assert: { exists: 'model::model\.layers\.15\.mlp\.down_proj\.weight' }
+
+  # ------------------------------------------------------------------- prune
+  # Remove every tensor of blocks 2, 6, 10, 14 (7 tensors each).
+  - delete: { target: 'model::model\.layers\.(?:2|6|10|14)\..*' }
+  - assert: { count: { of: 'model::model\.layers\.\d+\..*', is: 84 } }
+  - assert: { not: { exists: 'model::model\.layers\.(?:2|6|10|14)\..*' } }
+
+  # --------------------------------------------------------------- renumber
+  # Ascending old index; blocks 0 and 1 already sit at their final index.
+  - move: { from: 'model::model\.layers\.3\.(.*)',  to: 'model::model.layers.2.\1' }
+  - move: { from: 'model::model\.layers\.4\.(.*)',  to: 'model::model.layers.3.\1' }
+  - move: { from: 'model::model\.layers\.5\.(.*)',  to: 'model::model.layers.4.\1' }
+  - move: { from: 'model::model\.layers\.7\.(.*)',  to: 'model::model.layers.5.\1' }
+  - move: { from: 'model::model\.layers\.8\.(.*)',  to: 'model::model.layers.6.\1' }
+  - move: { from: 'model::model\.layers\.9\.(.*)',  to: 'model::model.layers.7.\1' }
+  - move: { from: 'model::model\.layers\.11\.(.*)', to: 'model::model.layers.8.\1' }
+  - move: { from: 'model::model\.layers\.12\.(.*)', to: 'model::model.layers.9.\1' }
+  - move: { from: 'model::model\.layers\.13\.(.*)', to: 'model::model.layers.10.\1' }
+  - move: { from: 'model::model\.layers\.15\.(.*)', to: 'model::model.layers.11.\1' }
+
+  # ------------------------------------------------------- required checks
+  # 1. no tensor of blocks 12, 13, 14, 15 remains
+  - assert: { not: { exists: 'model::model\.layers\.(?:12|13|14|15)\..*' } }
+  # 2. exactly 12 blocks remain
+  - assert: { count: { of: 'model::model\.layers\.\d+\.self_attn\.q_proj\.weight', is: 12 } }
+  # 3. the output has exactly 86 tensors
+  - assert: { count: { of: 'model::.*', is: 86 } }
+
+  # ------------------------------------------------------ integrity checks
+  # Every surviving block is complete (7 tensors) and correctly shaped, and
+  # every block index 0..11 is present exactly once.
+  - assert: { count: { of: 'model::model\.layers\.\d+\..*', is: 84 } }
+  - assert: { count: { of: 'model::model\.layers\.(?:0|1|2|3|4|5|6|7|8|9|10|11)\..*', is: 84 } }
+  - assert: { count: { of: 'model::model\.layers\.\d+\.self_attn\.k_proj\.weight', is: 12 } }
+  - assert: { count: { of: 'model::model\.layers\.\d+\.self_attn\.v_proj\.weight', is: 12 } }
+  - assert: { count: { of: 'model::model\.layers\.\d+\.self_attn\.o_proj\.weight', is: 12 } }
+  - assert: { count: { of: 'model::model\.layers\.\d+\.mlp\.gate_proj\.weight', is: 12 } }
+  - assert: { count: { of: 'model::model\.layers\.\d+\.mlp\.up_proj\.weight', is: 12 } }
+  - assert: { count: { of: 'model::model\.layers\.\d+\.mlp\.down_proj\.weight', is: 12 } }
+  - assert: { shape: { of: 'model::model\.layers\.\d+\.self_attn\.q_proj\.weight', is: [2048, 2048] } }
+  - assert: { shape: { of: 'model::model\.layers\.\d+\.mlp\.gate_proj\.weight', is: [8192, 2048] } }
+  - assert: { shape: { of: 'model::model\.layers\.\d+\.mlp\.down_proj\.weight', is: [2048, 8192] } }
+  - assert: { dtype: { of: 'model::.*', is: float32 } }
+
+  # The two non-block tensors survived untouched.
+  - assert: { shape: { of: 'model::model\.embed_tokens\.weight', is: [50304, 2048] } }
+  - assert: { shape: { of: 'model::lm_head\.weight', is: [50304, 2048] } }
+
+  # ------------------------------------------------- renumbering is correct
+  # The counts above cannot distinguish a correct renumbering from one where
+  # blocks were shifted onto the wrong indices, so compare each new block
+  # against the original block it must come from, tensor by tensor.
+  - assert:
+      equal:
+        left: 'model::model\.layers\.0\.(.*)'
+        right: 'ref::model.layers.0.\1'
+  - assert:
+      equal:
+        left: 'model::model\.layers\.1\.(.*)'
+        right: 'ref::model.layers.1.\1'
+  - assert:
+      equal:
+        left: 'model::model\.layers\.2\.(.*)'
+        right: 'ref::model.layers.3.\1'
+  - assert:
+      equal:
+        left: 'model::model\.layers\.3\.(.*)'
+        right: 'ref::model.layers.4.\1'
+  - assert:
+      equal:
+        left: 'model::model\.layers\.4\.(.*)'
+        right: 'ref::model.layers.5.\1'
+  - assert:
+      equal:
+        left: 'model::model\.layers\.5\.(.*)'
+        right: 'ref::model.layers.7.\1'
+  - assert:
+      equal:
+        left: 'model::model\.layers\.6\.(.*)'
+        right: 'ref::model.layers.8.\1'
+  - assert:
+      equal:
+        left: 'model::model\.layers\.7\.(.*)'
+        right: 'ref::model.layers.9.\1'
+  - assert:
+      equal:
+        left: 'model::model\.layers\.8\.(.*)'
+        right: 'ref::model.layers.11.\1'
+  - assert:
+      equal:
+        left: 'model::model\.layers\.9\.(.*)'
+        right: 'ref::model.layers.12.\1'
+  - assert:
+      equal:
+        left: 'model::model\.layers\.10\.(.*)'
+        right: 'ref::model.layers.13.\1'
+  - assert:
+      equal:
+        left: 'model::model\.layers\.11\.(.*)'
+        right: 'ref::model.layers.15.\1'
+  # ... and the two non-block tensors are bit-identical to the input.
+  - assert: { equal: { left: 'model::model\.embed_tokens\.weight', right: 'ref::model.embed_tokens.weight' } }
+  - assert: { equal: { left: 'model::lm_head\.weight', right: 'ref::lm_head.weight' } }

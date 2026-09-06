@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/pythia-1b/P/T4-defective.py",
+  "started_at": "2026-09-05T21:25:35+00:00",
+  "finished_at": "2026-09-05T21:25:41+00:00",
+  "wall_clock_s": 5.9,
+  "tokens_in": 2,
+  "tokens_out": 250,
+  "cost_usd": 0.0381378,
+  "verdict_text": "NO\n\nThe merge computes `tmp = base + lambda*(ft1-base)`, then `tmp + lambda*(ft2-tmp)`, i.e. the second task vector is taken against `tmp` (already merged with ft1), not against the unmodified base. This violates the ordering requirement of clause 2, which specifies `out = base + lambda*(ft1-base) + lambda*(ft2-base)`, with each task vector computed against the original base. Algebraically the artifact computes `base + lambda*(ft1-base) + lambda*(1-lambda)*(ft2-base)`, an extra `(1-lambda)` factor on the ft2 term, which will exceed the 1e-3 relative Frobenius tolerance for lambda=0.4.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "Task vector 2 is computed against the base after task vector 1 has already been added, so the second delta is taken from the wrong reference point.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

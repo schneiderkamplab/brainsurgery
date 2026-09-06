@@ -1,0 +1,126 @@
+# T2: structured attention-head pruning for OLMo-1B-0724-hf.
+#
+# Remove head 5 (0-based) from every layer: heads are 128-wide, so the block to
+# drop is rows 640:768 of q/k/v (nn.Linear [out, in] -> heads are row blocks)
+# and columns 640:768 of o_proj (heads are column blocks of the input side).
+#
+# Every rule below is pattern-based, so a single transform covers all 16 layers.
+# Method per tensor, without any per-layer enumeration:
+#   1. snapshot the two kept blocks (head = 0:640, tail = 768:2048),
+#   2. write the tail snapshot back over rows/cols 640:1920 (shift it up),
+#   3. copy the leading 1920 rows/cols into a fresh contiguous tensor,
+#   4. delete the originals and move the fresh tensors into their names.
+# The snapshots are kept until the end so the result can be checked block by
+# block against the pre-edit values, then deleted.
+
+inputs:
+  - model::inputs/base
+
+transforms:
+
+  # ---------------------------------------------------------------- preflight
+  - assert: { count: { of: 'model::.*', is: 114 } }
+  - assert: { count: { of: 'model::model\.layers\.\d+\.self_attn\.[qkv]_proj\.weight', is: 48 } }
+  - assert: { count: { of: 'model::model\.layers\.\d+\.self_attn\.o_proj\.weight', is: 16 } }
+  - assert: { shape: { of: 'model::model\.layers\.\d+\.self_attn\.[qkv]_proj\.weight', is: [2048, 2048] } }
+  - assert: { shape: { of: 'model::model\.layers\.\d+\.self_attn\.o_proj\.weight', is: [2048, 2048] } }
+  - assert: { dtype: { of: 'model::model\.layers\.\d+\.self_attn\.[qkvo]_proj\.weight', is: float32 } }
+
+  # ------------------------------------------------- snapshot the kept blocks
+  # q/k/v: rows. head = heads 0..4, tail = heads 6..15.
+  - copy:
+      from: 'model::model\.layers\.(\d+)\.self_attn\.([qkv])_proj\.weight::[:640, :]'
+      to: 'model::tmpkeep.head.\1.\2'
+  - copy:
+      from: 'model::model\.layers\.(\d+)\.self_attn\.([qkv])_proj\.weight::[768:, :]'
+      to: 'model::tmpkeep.tail.\1.\2'
+  # o_proj: columns.
+  - copy:
+      from: 'model::model\.layers\.(\d+)\.self_attn\.o_proj\.weight::[:, :640]'
+      to: 'model::tmpkeep.ohead.\1'
+  - copy:
+      from: 'model::model\.layers\.(\d+)\.self_attn\.o_proj\.weight::[:, 768:]'
+      to: 'model::tmpkeep.otail.\1'
+
+  - assert: { shape: { of: 'model::tmpkeep\.head\.\d+\.[qkv]', is: [640, 2048] } }
+  - assert: { shape: { of: 'model::tmpkeep\.tail\.\d+\.[qkv]', is: [1280, 2048] } }
+  - assert: { shape: { of: 'model::tmpkeep\.ohead\.\d+', is: [2048, 640] } }
+  - assert: { shape: { of: 'model::tmpkeep\.otail\.\d+', is: [2048, 1280] } }
+  - assert: { count: { of: 'model::tmpkeep\..*', is: 128 } }
+
+  # ------------------------------- close the gap: move the tail block upwards
+  # The snapshots are independent clones, so this is not an overlapping copy.
+  - assign:
+      from: 'model::tmpkeep\.tail\.(\d+)\.([qkv])'
+      to: 'model::model.layers.\1.self_attn.\2_proj.weight::[640:1920, :]'
+  - assign:
+      from: 'model::tmpkeep\.otail\.(\d+)'
+      to: 'model::model.layers.\1.self_attn.o_proj.weight::[:, 640:1920]'
+
+  # ----------------------------------- crop to 15 heads into fresh tensors ...
+  - copy:
+      from: 'model::model\.layers\.(\d+)\.self_attn\.([qkv])_proj\.weight::[:1920, :]'
+      to: 'model::tmpnew.\1.\2'
+  - copy:
+      from: 'model::model\.layers\.(\d+)\.self_attn\.o_proj\.weight::[:, :1920]'
+      to: 'model::tmpnew.\1.o'
+
+  # ... and put them back under the original names.
+  - delete: { target: 'model::model\.layers\.\d+\.self_attn\.[qkvo]_proj\.weight' }
+  # (count needs at least one match, so absence is checked with not/exists.)
+  - assert: { not: { exists: 'model::model\.layers\.\d+\.self_attn\..*' } }
+  - move:
+      from: 'model::tmpnew\.(\d+)\.([qkvo])'
+      to: 'model::model.layers.\1.self_attn.\2_proj.weight'
+  - assert: { not: { exists: 'model::tmpnew\..*' } }
+
+  # ------------------------------------------------------------ shape checks
+  # Required checks, spelled out for layer 0 ...
+  - assert: { shape: { of: 'model::model\.layers\.0\.self_attn\.q_proj\.weight', is: [1920, 2048] } }
+  - assert: { shape: { of: 'model::model\.layers\.0\.self_attn\.k_proj\.weight', is: [1920, 2048] } }
+  - assert: { shape: { of: 'model::model\.layers\.0\.self_attn\.v_proj\.weight', is: [1920, 2048] } }
+  - assert: { shape: { of: 'model::model\.layers\.0\.self_attn\.o_proj\.weight', is: [2048, 1920] } }
+  # ... and generalised to every layer.
+  - assert: { shape: { of: 'model::model\.layers\.\d+\.self_attn\.[qkv]_proj\.weight', is: [1920, 2048] } }
+  - assert: { shape: { of: 'model::model\.layers\.\d+\.self_attn\.o_proj\.weight', is: [2048, 1920] } }
+  - assert: { dtype: { of: 'model::model\.layers\.\d+\.self_attn\.[qkvo]_proj\.weight', is: float32 } }
+
+  # ------------------------------------------------------------ value checks
+  # Every kept block must still hold its pre-edit values, in the right order.
+  - assert:
+      equal:
+        left: 'model::tmpkeep\.head\.(\d+)\.([qkv])'
+        right: 'model::model.layers.\1.self_attn.\2_proj.weight::[:640, :]'
+  - assert:
+      equal:
+        left: 'model::tmpkeep\.tail\.(\d+)\.([qkv])'
+        right: 'model::model.layers.\1.self_attn.\2_proj.weight::[640:1920, :]'
+  - assert:
+      equal:
+        left: 'model::tmpkeep\.ohead\.(\d+)'
+        right: 'model::model.layers.\1.self_attn.o_proj.weight::[:, :640]'
+  - assert:
+      equal:
+        left: 'model::tmpkeep\.otail\.(\d+)'
+        right: 'model::model.layers.\1.self_attn.o_proj.weight::[:, 640:1920]'
+
+  # --------------------------------------------------- untouched tensors ...
+  - assert: { count: { of: 'model::model\.layers\.\d+\.mlp\..*', is: 48 } }
+  - assert: { shape: { of: 'model::model\.layers\.\d+\.mlp\.gate_proj\.weight', is: [8192, 2048] } }
+  - assert: { shape: { of: 'model::model\.layers\.\d+\.mlp\.up_proj\.weight', is: [8192, 2048] } }
+  - assert: { shape: { of: 'model::model\.layers\.\d+\.mlp\.down_proj\.weight', is: [2048, 8192] } }
+  - assert: { shape: { of: 'model::model\.embed_tokens\.weight', is: [50304, 2048] } }
+  - assert: { shape: { of: 'model::lm_head\.weight', is: [50304, 2048] } }
+
+  # ------------------------------------------------------------- tidy up ...
+  - delete: { target: 'model::tmpkeep\..*' }
+  - assert: { not: { exists: 'model::tmpkeep\..*' } }
+  - assert: { not: { exists: 'model::tmpnew\..*' } }
+
+  # ... and the final tensor count that is written out.
+  - assert: { count: { of: 'model::.*', is: 114 } }
+  - assert: { count: { of: 'model::model\.layers\.\d+\..*', is: 112 } }
+
+output:
+  path: out/T2/model.safetensors
+  format: safetensors

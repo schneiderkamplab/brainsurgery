@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/pythia-1b/P/T4-defective.py",
+  "started_at": "2026-09-05T23:31:06+00:00",
+  "finished_at": "2026-09-05T23:31:14+00:00",
+  "wall_clock_s": 8.6,
+  "tokens_in": 2,
+  "tokens_out": 582,
+  "cost_usd": 0.1008705,
+  "verdict_text": "NO\n\nThe merge is computed sequentially against the already-modified base instead of against the unmodified base, which is exactly the ordering hazard the specification calls out. `tmp = b + \u03bb(f1 \u2212 b)` and then `out = tmp + \u03bb(f2 \u2212 tmp)` expands to `b + 0.24\u00b7(f1 \u2212 b) + 0.4\u00b7(f2 \u2212 b)`, so ft1's task vector is scaled by 0.24 instead of 0.4, violating the formula in \"Required result\" step 2. The verification, the `merged == 64` check, the `len(out) == 244` check, the dtype cast and the untouched tensors are all correct; only the arithmetic is wrong. The relative error on all 64 merged tensors would be far above the 1e-3 grading tolerance unless the two fine-tunes happen to be nearly identical.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "Task vector 2 is computed against the base after task vector 1 has already been added, so the second delta is taken from the wrong reference point.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/P/T2-defective.py",
+  "started_at": "2026-09-05T21:41:44+00:00",
+  "finished_at": "2026-09-05T21:41:49+00:00",
+  "wall_clock_s": 4.5,
+  "tokens_in": 2,
+  "tokens_out": 173,
+  "cost_usd": 0.0396848,
+  "verdict_text": "NO\n\nThe artifact removes head 6, not head 5 as required by \"Required result\" (removes head 5). Head 6 occupies rows/columns 768..895, so keeping \"0..639, 768..2047\" (spec) differs from what the script actually keeps (0..767, 896..2047), violating clauses 1\u20134 of \"Required result.\" The shape assertions still pass (1920\u00d72048 etc.) since removing any single head yields the same shape, but the content is wrong, so it will fail the bit-exact/value comparison in \"Grading.\"",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The removed head is off by one (head N+1 instead of head N). All shapes are still correct, so the artifact's own shape checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

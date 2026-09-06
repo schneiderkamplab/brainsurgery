@@ -1,0 +1,72 @@
+# T5: merge a PEFT LoRA adapter into OLMo-1B base weights, export sharded.
+#
+#   W <- W + (alpha / r) * B @ A        with alpha = 32, r = 16  ->  scale = 2
+#
+# fan_in_fan_out = false and the base weights use the nn.Linear [out, in]
+# layout, so B @ A ([2048, 16] @ [16, 2048] = [2048, 2048]) is added directly.
+#
+# Every write goes to the `base` alias so the output model is unambiguous;
+# the deltas live under the temporary prefix `tmp_delta.` and are deleted
+# before the checkpoint is written.
+
+inputs:
+  - base::inputs/base
+  - lora::inputs/lora/adapter_model.safetensors
+
+transforms:
+  # ---- preflight ------------------------------------------------------
+  - assert: { count: { of: 'base::.*', is: 114 } }
+  - assert: { count: { of: 'lora::.*', is: 64 } }
+  - assert: { count: { of: 'lora::.*\.lora_A\.weight', is: 32 } }
+  - assert: { count: { of: 'lora::.*\.lora_B\.weight', is: 32 } }
+  - assert:
+      shape:
+        of: 'base::model\.layers\.0\.self_attn\.q_proj\.weight'
+        is: [2048, 2048]
+  - assert:
+      shape:
+        of: 'lora::base_model\.model\.model\.layers\.0\.self_attn\.q_proj\.lora_A\.weight'
+        is: [16, 2048]
+  - assert:
+      shape:
+        of: 'lora::base_model\.model\.model\.layers\.0\.self_attn\.q_proj\.lora_B\.weight'
+        is: [2048, 16]
+  - assert: { dtype: { of: 'base::model\.layers\.0\.self_attn\.q_proj\.weight', is: float32 } }
+  - assert: { dtype: { of: 'lora::base_model\.model\.model\.layers\.0\.self_attn\.q_proj\.lora_A\.weight', is: float32 } }
+
+  # ---- delta = B @ A, one per adapter pair ----------------------------
+  - matmul:
+      from_a: 'lora::base_model\.model\.model\.layers\.(\d+)\.(self_attn\.[qv]_proj)\.lora_B\.weight'
+      from_b: 'lora::base_model.model.model.layers.\1.\2.lora_A.weight'
+      to: 'base::tmp_delta.\1.\2'
+
+  # Required check: exactly 32 adapter pairs were found and merged.
+  - assert: { count: { of: 'base::tmp_delta\..*', is: 32 } }
+  - assert: { shape: { of: 'base::tmp_delta\.0\.self_attn\.q_proj', is: [2048, 2048] } }
+  - assert: { dtype: { of: 'base::tmp_delta\.0\.self_attn\.q_proj', is: float32 } }
+
+  # ---- delta *= alpha / r = 2 -----------------------------------------
+  - scale_: { target: 'base::tmp_delta\..*', by: 2.0 }
+
+  # ---- W += delta ------------------------------------------------------
+  - add_:
+      from: 'base::tmp_delta\.(\d+)\.(self_attn\.[qv]_proj)'
+      to: 'base::model.layers.\1.\2.weight'
+
+  # ---- drop every intermediate ----------------------------------------
+  - delete: { target: 'base::tmp_delta\..*' }
+
+  # ---- required checks before writing ---------------------------------
+  - assert: { not: { exists: 'base::.*lora_.*' } }
+  - assert: { not: { exists: 'base::tmp_delta.*' } }
+  - assert:
+      shape:
+        of: 'base::model\.layers\.0\.self_attn\.q_proj\.weight'
+        is: [2048, 2048]
+  - assert: { dtype: { of: 'base::model\.layers\.0\.self_attn\.q_proj\.weight', is: float32 } }
+  - assert: { count: { of: 'base::.*', is: 114 } }
+
+output:
+  path: out/T5
+  format: safetensors
+  shard: 512MB

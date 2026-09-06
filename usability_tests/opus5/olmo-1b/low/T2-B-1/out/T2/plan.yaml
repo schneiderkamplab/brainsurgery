@@ -1,0 +1,270 @@
+inputs:
+  - model::inputs/base
+
+transforms:
+  - copy: { from: 'model\.layers\.0\.self_attn\.q_proj\.weight::[:640, :]', to: 'tmp_0_q_a' }
+  - copy: { from: 'model\.layers\.0\.self_attn\.q_proj\.weight::[768:, :]', to: 'tmp_0_q_b' }
+  - delete: { target: 'model\.layers\.0\.self_attn\.q_proj\.weight' }
+  - concat: { from: ['tmp_0_q_a', 'tmp_0_q_b'], to: 'model.layers.0.self_attn.q_proj.weight', dim: 0 }
+  - copy: { from: 'model\.layers\.0\.self_attn\.k_proj\.weight::[:640, :]', to: 'tmp_0_k_a' }
+  - copy: { from: 'model\.layers\.0\.self_attn\.k_proj\.weight::[768:, :]', to: 'tmp_0_k_b' }
+  - delete: { target: 'model\.layers\.0\.self_attn\.k_proj\.weight' }
+  - concat: { from: ['tmp_0_k_a', 'tmp_0_k_b'], to: 'model.layers.0.self_attn.k_proj.weight', dim: 0 }
+  - copy: { from: 'model\.layers\.0\.self_attn\.v_proj\.weight::[:640, :]', to: 'tmp_0_v_a' }
+  - copy: { from: 'model\.layers\.0\.self_attn\.v_proj\.weight::[768:, :]', to: 'tmp_0_v_b' }
+  - delete: { target: 'model\.layers\.0\.self_attn\.v_proj\.weight' }
+  - concat: { from: ['tmp_0_v_a', 'tmp_0_v_b'], to: 'model.layers.0.self_attn.v_proj.weight', dim: 0 }
+  - copy: { from: 'model\.layers\.0\.self_attn\.o_proj\.weight::[:, :640]', to: 'tmp_0_o_a' }
+  - copy: { from: 'model\.layers\.0\.self_attn\.o_proj\.weight::[:, 768:]', to: 'tmp_0_o_b' }
+  - delete: { target: 'model\.layers\.0\.self_attn\.o_proj\.weight' }
+  - concat: { from: ['tmp_0_o_a', 'tmp_0_o_b'], to: 'model.layers.0.self_attn.o_proj.weight', dim: 1 }
+  - copy: { from: 'model\.layers\.1\.self_attn\.q_proj\.weight::[:640, :]', to: 'tmp_1_q_a' }
+  - copy: { from: 'model\.layers\.1\.self_attn\.q_proj\.weight::[768:, :]', to: 'tmp_1_q_b' }
+  - delete: { target: 'model\.layers\.1\.self_attn\.q_proj\.weight' }
+  - concat: { from: ['tmp_1_q_a', 'tmp_1_q_b'], to: 'model.layers.1.self_attn.q_proj.weight', dim: 0 }
+  - copy: { from: 'model\.layers\.1\.self_attn\.k_proj\.weight::[:640, :]', to: 'tmp_1_k_a' }
+  - copy: { from: 'model\.layers\.1\.self_attn\.k_proj\.weight::[768:, :]', to: 'tmp_1_k_b' }
+  - delete: { target: 'model\.layers\.1\.self_attn\.k_proj\.weight' }
+  - concat: { from: ['tmp_1_k_a', 'tmp_1_k_b'], to: 'model.layers.1.self_attn.k_proj.weight', dim: 0 }
+  - copy: { from: 'model\.layers\.1\.self_attn\.v_proj\.weight::[:640, :]', to: 'tmp_1_v_a' }
+  - copy: { from: 'model\.layers\.1\.self_attn\.v_proj\.weight::[768:, :]', to: 'tmp_1_v_b' }
+  - delete: { target: 'model\.layers\.1\.self_attn\.v_proj\.weight' }
+  - concat: { from: ['tmp_1_v_a', 'tmp_1_v_b'], to: 'model.layers.1.self_attn.v_proj.weight', dim: 0 }
+  - copy: { from: 'model\.layers\.1\.self_attn\.o_proj\.weight::[:, :640]', to: 'tmp_1_o_a' }
+  - copy: { from: 'model\.layers\.1\.self_attn\.o_proj\.weight::[:, 768:]', to: 'tmp_1_o_b' }
+  - delete: { target: 'model\.layers\.1\.self_attn\.o_proj\.weight' }
+  - concat: { from: ['tmp_1_o_a', 'tmp_1_o_b'], to: 'model.layers.1.self_attn.o_proj.weight', dim: 1 }
+  - copy: { from: 'model\.layers\.2\.self_attn\.q_proj\.weight::[:640, :]', to: 'tmp_2_q_a' }
+  - copy: { from: 'model\.layers\.2\.self_attn\.q_proj\.weight::[768:, :]', to: 'tmp_2_q_b' }
+  - delete: { target: 'model\.layers\.2\.self_attn\.q_proj\.weight' }
+  - concat: { from: ['tmp_2_q_a', 'tmp_2_q_b'], to: 'model.layers.2.self_attn.q_proj.weight', dim: 0 }
+  - copy: { from: 'model\.layers\.2\.self_attn\.k_proj\.weight::[:640, :]', to: 'tmp_2_k_a' }
+  - copy: { from: 'model\.layers\.2\.self_attn\.k_proj\.weight::[768:, :]', to: 'tmp_2_k_b' }
+  - delete: { target: 'model\.layers\.2\.self_attn\.k_proj\.weight' }
+  - concat: { from: ['tmp_2_k_a', 'tmp_2_k_b'], to: 'model.layers.2.self_attn.k_proj.weight', dim: 0 }
+  - copy: { from: 'model\.layers\.2\.self_attn\.v_proj\.weight::[:640, :]', to: 'tmp_2_v_a' }
+  - copy: { from: 'model\.layers\.2\.self_attn\.v_proj\.weight::[768:, :]', to: 'tmp_2_v_b' }
+  - delete: { target: 'model\.layers\.2\.self_attn\.v_proj\.weight' }
+  - concat: { from: ['tmp_2_v_a', 'tmp_2_v_b'], to: 'model.layers.2.self_attn.v_proj.weight', dim: 0 }
+  - copy: { from: 'model\.layers\.2\.self_attn\.o_proj\.weight::[:, :640]', to: 'tmp_2_o_a' }
+  - copy: { from: 'model\.layers\.2\.self_attn\.o_proj\.weight::[:, 768:]', to: 'tmp_2_o_b' }
+  - delete: { target: 'model\.layers\.2\.self_attn\.o_proj\.weight' }
+  - concat: { from: ['tmp_2_o_a', 'tmp_2_o_b'], to: 'model.layers.2.self_attn.o_proj.weight', dim: 1 }
+  - copy: { from: 'model\.layers\.3\.self_attn\.q_proj\.weight::[:640, :]', to: 'tmp_3_q_a' }
+  - copy: { from: 'model\.layers\.3\.self_attn\.q_proj\.weight::[768:, :]', to: 'tmp_3_q_b' }
+  - delete: { target: 'model\.layers\.3\.self_attn\.q_proj\.weight' }
+  - concat: { from: ['tmp_3_q_a', 'tmp_3_q_b'], to: 'model.layers.3.self_attn.q_proj.weight', dim: 0 }
+  - copy: { from: 'model\.layers\.3\.self_attn\.k_proj\.weight::[:640, :]', to: 'tmp_3_k_a' }
+  - copy: { from: 'model\.layers\.3\.self_attn\.k_proj\.weight::[768:, :]', to: 'tmp_3_k_b' }
+  - delete: { target: 'model\.layers\.3\.self_attn\.k_proj\.weight' }
+  - concat: { from: ['tmp_3_k_a', 'tmp_3_k_b'], to: 'model.layers.3.self_attn.k_proj.weight', dim: 0 }
+  - copy: { from: 'model\.layers\.3\.self_attn\.v_proj\.weight::[:640, :]', to: 'tmp_3_v_a' }
+  - copy: { from: 'model\.layers\.3\.self_attn\.v_proj\.weight::[768:, :]', to: 'tmp_3_v_b' }
+  - delete: { target: 'model\.layers\.3\.self_attn\.v_proj\.weight' }
+  - concat: { from: ['tmp_3_v_a', 'tmp_3_v_b'], to: 'model.layers.3.self_attn.v_proj.weight', dim: 0 }
+  - copy: { from: 'model\.layers\.3\.self_attn\.o_proj\.weight::[:, :640]', to: 'tmp_3_o_a' }
+  - copy: { from: 'model\.layers\.3\.self_attn\.o_proj\.weight::[:, 768:]', to: 'tmp_3_o_b' }
+  - delete: { target: 'model\.layers\.3\.self_attn\.o_proj\.weight' }
+  - concat: { from: ['tmp_3_o_a', 'tmp_3_o_b'], to: 'model.layers.3.self_attn.o_proj.weight', dim: 1 }
+  - copy: { from: 'model\.layers\.4\.self_attn\.q_proj\.weight::[:640, :]', to: 'tmp_4_q_a' }
+  - copy: { from: 'model\.layers\.4\.self_attn\.q_proj\.weight::[768:, :]', to: 'tmp_4_q_b' }
+  - delete: { target: 'model\.layers\.4\.self_attn\.q_proj\.weight' }
+  - concat: { from: ['tmp_4_q_a', 'tmp_4_q_b'], to: 'model.layers.4.self_attn.q_proj.weight', dim: 0 }
+  - copy: { from: 'model\.layers\.4\.self_attn\.k_proj\.weight::[:640, :]', to: 'tmp_4_k_a' }
+  - copy: { from: 'model\.layers\.4\.self_attn\.k_proj\.weight::[768:, :]', to: 'tmp_4_k_b' }
+  - delete: { target: 'model\.layers\.4\.self_attn\.k_proj\.weight' }
+  - concat: { from: ['tmp_4_k_a', 'tmp_4_k_b'], to: 'model.layers.4.self_attn.k_proj.weight', dim: 0 }
+  - copy: { from: 'model\.layers\.4\.self_attn\.v_proj\.weight::[:640, :]', to: 'tmp_4_v_a' }
+  - copy: { from: 'model\.layers\.4\.self_attn\.v_proj\.weight::[768:, :]', to: 'tmp_4_v_b' }
+  - delete: { target: 'model\.layers\.4\.self_attn\.v_proj\.weight' }
+  - concat: { from: ['tmp_4_v_a', 'tmp_4_v_b'], to: 'model.layers.4.self_attn.v_proj.weight', dim: 0 }
+  - copy: { from: 'model\.layers\.4\.self_attn\.o_proj\.weight::[:, :640]', to: 'tmp_4_o_a' }
+  - copy: { from: 'model\.layers\.4\.self_attn\.o_proj\.weight::[:, 768:]', to: 'tmp_4_o_b' }
+  - delete: { target: 'model\.layers\.4\.self_attn\.o_proj\.weight' }
+  - concat: { from: ['tmp_4_o_a', 'tmp_4_o_b'], to: 'model.layers.4.self_attn.o_proj.weight', dim: 1 }
+  - copy: { from: 'model\.layers\.5\.self_attn\.q_proj\.weight::[:640, :]', to: 'tmp_5_q_a' }
+  - copy: { from: 'model\.layers\.5\.self_attn\.q_proj\.weight::[768:, :]', to: 'tmp_5_q_b' }
+  - delete: { target: 'model\.layers\.5\.self_attn\.q_proj\.weight' }
+  - concat: { from: ['tmp_5_q_a', 'tmp_5_q_b'], to: 'model.layers.5.self_attn.q_proj.weight', dim: 0 }
+  - copy: { from: 'model\.layers\.5\.self_attn\.k_proj\.weight::[:640, :]', to: 'tmp_5_k_a' }
+  - copy: { from: 'model\.layers\.5\.self_attn\.k_proj\.weight::[768:, :]', to: 'tmp_5_k_b' }
+  - delete: { target: 'model\.layers\.5\.self_attn\.k_proj\.weight' }
+  - concat: { from: ['tmp_5_k_a', 'tmp_5_k_b'], to: 'model.layers.5.self_attn.k_proj.weight', dim: 0 }
+  - copy: { from: 'model\.layers\.5\.self_attn\.v_proj\.weight::[:640, :]', to: 'tmp_5_v_a' }
+  - copy: { from: 'model\.layers\.5\.self_attn\.v_proj\.weight::[768:, :]', to: 'tmp_5_v_b' }
+  - delete: { target: 'model\.layers\.5\.self_attn\.v_proj\.weight' }
+  - concat: { from: ['tmp_5_v_a', 'tmp_5_v_b'], to: 'model.layers.5.self_attn.v_proj.weight', dim: 0 }
+  - copy: { from: 'model\.layers\.5\.self_attn\.o_proj\.weight::[:, :640]', to: 'tmp_5_o_a' }
+  - copy: { from: 'model\.layers\.5\.self_attn\.o_proj\.weight::[:, 768:]', to: 'tmp_5_o_b' }
+  - delete: { target: 'model\.layers\.5\.self_attn\.o_proj\.weight' }
+  - concat: { from: ['tmp_5_o_a', 'tmp_5_o_b'], to: 'model.layers.5.self_attn.o_proj.weight', dim: 1 }
+  - copy: { from: 'model\.layers\.6\.self_attn\.q_proj\.weight::[:640, :]', to: 'tmp_6_q_a' }
+  - copy: { from: 'model\.layers\.6\.self_attn\.q_proj\.weight::[768:, :]', to: 'tmp_6_q_b' }
+  - delete: { target: 'model\.layers\.6\.self_attn\.q_proj\.weight' }
+  - concat: { from: ['tmp_6_q_a', 'tmp_6_q_b'], to: 'model.layers.6.self_attn.q_proj.weight', dim: 0 }
+  - copy: { from: 'model\.layers\.6\.self_attn\.k_proj\.weight::[:640, :]', to: 'tmp_6_k_a' }
+  - copy: { from: 'model\.layers\.6\.self_attn\.k_proj\.weight::[768:, :]', to: 'tmp_6_k_b' }
+  - delete: { target: 'model\.layers\.6\.self_attn\.k_proj\.weight' }
+  - concat: { from: ['tmp_6_k_a', 'tmp_6_k_b'], to: 'model.layers.6.self_attn.k_proj.weight', dim: 0 }
+  - copy: { from: 'model\.layers\.6\.self_attn\.v_proj\.weight::[:640, :]', to: 'tmp_6_v_a' }
+  - copy: { from: 'model\.layers\.6\.self_attn\.v_proj\.weight::[768:, :]', to: 'tmp_6_v_b' }
+  - delete: { target: 'model\.layers\.6\.self_attn\.v_proj\.weight' }
+  - concat: { from: ['tmp_6_v_a', 'tmp_6_v_b'], to: 'model.layers.6.self_attn.v_proj.weight', dim: 0 }
+  - copy: { from: 'model\.layers\.6\.self_attn\.o_proj\.weight::[:, :640]', to: 'tmp_6_o_a' }
+  - copy: { from: 'model\.layers\.6\.self_attn\.o_proj\.weight::[:, 768:]', to: 'tmp_6_o_b' }
+  - delete: { target: 'model\.layers\.6\.self_attn\.o_proj\.weight' }
+  - concat: { from: ['tmp_6_o_a', 'tmp_6_o_b'], to: 'model.layers.6.self_attn.o_proj.weight', dim: 1 }
+  - copy: { from: 'model\.layers\.7\.self_attn\.q_proj\.weight::[:640, :]', to: 'tmp_7_q_a' }
+  - copy: { from: 'model\.layers\.7\.self_attn\.q_proj\.weight::[768:, :]', to: 'tmp_7_q_b' }
+  - delete: { target: 'model\.layers\.7\.self_attn\.q_proj\.weight' }
+  - concat: { from: ['tmp_7_q_a', 'tmp_7_q_b'], to: 'model.layers.7.self_attn.q_proj.weight', dim: 0 }
+  - copy: { from: 'model\.layers\.7\.self_attn\.k_proj\.weight::[:640, :]', to: 'tmp_7_k_a' }
+  - copy: { from: 'model\.layers\.7\.self_attn\.k_proj\.weight::[768:, :]', to: 'tmp_7_k_b' }
+  - delete: { target: 'model\.layers\.7\.self_attn\.k_proj\.weight' }
+  - concat: { from: ['tmp_7_k_a', 'tmp_7_k_b'], to: 'model.layers.7.self_attn.k_proj.weight', dim: 0 }
+  - copy: { from: 'model\.layers\.7\.self_attn\.v_proj\.weight::[:640, :]', to: 'tmp_7_v_a' }
+  - copy: { from: 'model\.layers\.7\.self_attn\.v_proj\.weight::[768:, :]', to: 'tmp_7_v_b' }
+  - delete: { target: 'model\.layers\.7\.self_attn\.v_proj\.weight' }
+  - concat: { from: ['tmp_7_v_a', 'tmp_7_v_b'], to: 'model.layers.7.self_attn.v_proj.weight', dim: 0 }
+  - copy: { from: 'model\.layers\.7\.self_attn\.o_proj\.weight::[:, :640]', to: 'tmp_7_o_a' }
+  - copy: { from: 'model\.layers\.7\.self_attn\.o_proj\.weight::[:, 768:]', to: 'tmp_7_o_b' }
+  - delete: { target: 'model\.layers\.7\.self_attn\.o_proj\.weight' }
+  - concat: { from: ['tmp_7_o_a', 'tmp_7_o_b'], to: 'model.layers.7.self_attn.o_proj.weight', dim: 1 }
+  - copy: { from: 'model\.layers\.8\.self_attn\.q_proj\.weight::[:640, :]', to: 'tmp_8_q_a' }
+  - copy: { from: 'model\.layers\.8\.self_attn\.q_proj\.weight::[768:, :]', to: 'tmp_8_q_b' }
+  - delete: { target: 'model\.layers\.8\.self_attn\.q_proj\.weight' }
+  - concat: { from: ['tmp_8_q_a', 'tmp_8_q_b'], to: 'model.layers.8.self_attn.q_proj.weight', dim: 0 }
+  - copy: { from: 'model\.layers\.8\.self_attn\.k_proj\.weight::[:640, :]', to: 'tmp_8_k_a' }
+  - copy: { from: 'model\.layers\.8\.self_attn\.k_proj\.weight::[768:, :]', to: 'tmp_8_k_b' }
+  - delete: { target: 'model\.layers\.8\.self_attn\.k_proj\.weight' }
+  - concat: { from: ['tmp_8_k_a', 'tmp_8_k_b'], to: 'model.layers.8.self_attn.k_proj.weight', dim: 0 }
+  - copy: { from: 'model\.layers\.8\.self_attn\.v_proj\.weight::[:640, :]', to: 'tmp_8_v_a' }
+  - copy: { from: 'model\.layers\.8\.self_attn\.v_proj\.weight::[768:, :]', to: 'tmp_8_v_b' }
+  - delete: { target: 'model\.layers\.8\.self_attn\.v_proj\.weight' }
+  - concat: { from: ['tmp_8_v_a', 'tmp_8_v_b'], to: 'model.layers.8.self_attn.v_proj.weight', dim: 0 }
+  - copy: { from: 'model\.layers\.8\.self_attn\.o_proj\.weight::[:, :640]', to: 'tmp_8_o_a' }
+  - copy: { from: 'model\.layers\.8\.self_attn\.o_proj\.weight::[:, 768:]', to: 'tmp_8_o_b' }
+  - delete: { target: 'model\.layers\.8\.self_attn\.o_proj\.weight' }
+  - concat: { from: ['tmp_8_o_a', 'tmp_8_o_b'], to: 'model.layers.8.self_attn.o_proj.weight', dim: 1 }
+  - copy: { from: 'model\.layers\.9\.self_attn\.q_proj\.weight::[:640, :]', to: 'tmp_9_q_a' }
+  - copy: { from: 'model\.layers\.9\.self_attn\.q_proj\.weight::[768:, :]', to: 'tmp_9_q_b' }
+  - delete: { target: 'model\.layers\.9\.self_attn\.q_proj\.weight' }
+  - concat: { from: ['tmp_9_q_a', 'tmp_9_q_b'], to: 'model.layers.9.self_attn.q_proj.weight', dim: 0 }
+  - copy: { from: 'model\.layers\.9\.self_attn\.k_proj\.weight::[:640, :]', to: 'tmp_9_k_a' }
+  - copy: { from: 'model\.layers\.9\.self_attn\.k_proj\.weight::[768:, :]', to: 'tmp_9_k_b' }
+  - delete: { target: 'model\.layers\.9\.self_attn\.k_proj\.weight' }
+  - concat: { from: ['tmp_9_k_a', 'tmp_9_k_b'], to: 'model.layers.9.self_attn.k_proj.weight', dim: 0 }
+  - copy: { from: 'model\.layers\.9\.self_attn\.v_proj\.weight::[:640, :]', to: 'tmp_9_v_a' }
+  - copy: { from: 'model\.layers\.9\.self_attn\.v_proj\.weight::[768:, :]', to: 'tmp_9_v_b' }
+  - delete: { target: 'model\.layers\.9\.self_attn\.v_proj\.weight' }
+  - concat: { from: ['tmp_9_v_a', 'tmp_9_v_b'], to: 'model.layers.9.self_attn.v_proj.weight', dim: 0 }
+  - copy: { from: 'model\.layers\.9\.self_attn\.o_proj\.weight::[:, :640]', to: 'tmp_9_o_a' }
+  - copy: { from: 'model\.layers\.9\.self_attn\.o_proj\.weight::[:, 768:]', to: 'tmp_9_o_b' }
+  - delete: { target: 'model\.layers\.9\.self_attn\.o_proj\.weight' }
+  - concat: { from: ['tmp_9_o_a', 'tmp_9_o_b'], to: 'model.layers.9.self_attn.o_proj.weight', dim: 1 }
+  - copy: { from: 'model\.layers\.10\.self_attn\.q_proj\.weight::[:640, :]', to: 'tmp_10_q_a' }
+  - copy: { from: 'model\.layers\.10\.self_attn\.q_proj\.weight::[768:, :]', to: 'tmp_10_q_b' }
+  - delete: { target: 'model\.layers\.10\.self_attn\.q_proj\.weight' }
+  - concat: { from: ['tmp_10_q_a', 'tmp_10_q_b'], to: 'model.layers.10.self_attn.q_proj.weight', dim: 0 }
+  - copy: { from: 'model\.layers\.10\.self_attn\.k_proj\.weight::[:640, :]', to: 'tmp_10_k_a' }
+  - copy: { from: 'model\.layers\.10\.self_attn\.k_proj\.weight::[768:, :]', to: 'tmp_10_k_b' }
+  - delete: { target: 'model\.layers\.10\.self_attn\.k_proj\.weight' }
+  - concat: { from: ['tmp_10_k_a', 'tmp_10_k_b'], to: 'model.layers.10.self_attn.k_proj.weight', dim: 0 }
+  - copy: { from: 'model\.layers\.10\.self_attn\.v_proj\.weight::[:640, :]', to: 'tmp_10_v_a' }
+  - copy: { from: 'model\.layers\.10\.self_attn\.v_proj\.weight::[768:, :]', to: 'tmp_10_v_b' }
+  - delete: { target: 'model\.layers\.10\.self_attn\.v_proj\.weight' }
+  - concat: { from: ['tmp_10_v_a', 'tmp_10_v_b'], to: 'model.layers.10.self_attn.v_proj.weight', dim: 0 }
+  - copy: { from: 'model\.layers\.10\.self_attn\.o_proj\.weight::[:, :640]', to: 'tmp_10_o_a' }
+  - copy: { from: 'model\.layers\.10\.self_attn\.o_proj\.weight::[:, 768:]', to: 'tmp_10_o_b' }
+  - delete: { target: 'model\.layers\.10\.self_attn\.o_proj\.weight' }
+  - concat: { from: ['tmp_10_o_a', 'tmp_10_o_b'], to: 'model.layers.10.self_attn.o_proj.weight', dim: 1 }
+  - copy: { from: 'model\.layers\.11\.self_attn\.q_proj\.weight::[:640, :]', to: 'tmp_11_q_a' }
+  - copy: { from: 'model\.layers\.11\.self_attn\.q_proj\.weight::[768:, :]', to: 'tmp_11_q_b' }
+  - delete: { target: 'model\.layers\.11\.self_attn\.q_proj\.weight' }
+  - concat: { from: ['tmp_11_q_a', 'tmp_11_q_b'], to: 'model.layers.11.self_attn.q_proj.weight', dim: 0 }
+  - copy: { from: 'model\.layers\.11\.self_attn\.k_proj\.weight::[:640, :]', to: 'tmp_11_k_a' }
+  - copy: { from: 'model\.layers\.11\.self_attn\.k_proj\.weight::[768:, :]', to: 'tmp_11_k_b' }
+  - delete: { target: 'model\.layers\.11\.self_attn\.k_proj\.weight' }
+  - concat: { from: ['tmp_11_k_a', 'tmp_11_k_b'], to: 'model.layers.11.self_attn.k_proj.weight', dim: 0 }
+  - copy: { from: 'model\.layers\.11\.self_attn\.v_proj\.weight::[:640, :]', to: 'tmp_11_v_a' }
+  - copy: { from: 'model\.layers\.11\.self_attn\.v_proj\.weight::[768:, :]', to: 'tmp_11_v_b' }
+  - delete: { target: 'model\.layers\.11\.self_attn\.v_proj\.weight' }
+  - concat: { from: ['tmp_11_v_a', 'tmp_11_v_b'], to: 'model.layers.11.self_attn.v_proj.weight', dim: 0 }
+  - copy: { from: 'model\.layers\.11\.self_attn\.o_proj\.weight::[:, :640]', to: 'tmp_11_o_a' }
+  - copy: { from: 'model\.layers\.11\.self_attn\.o_proj\.weight::[:, 768:]', to: 'tmp_11_o_b' }
+  - delete: { target: 'model\.layers\.11\.self_attn\.o_proj\.weight' }
+  - concat: { from: ['tmp_11_o_a', 'tmp_11_o_b'], to: 'model.layers.11.self_attn.o_proj.weight', dim: 1 }
+  - copy: { from: 'model\.layers\.12\.self_attn\.q_proj\.weight::[:640, :]', to: 'tmp_12_q_a' }
+  - copy: { from: 'model\.layers\.12\.self_attn\.q_proj\.weight::[768:, :]', to: 'tmp_12_q_b' }
+  - delete: { target: 'model\.layers\.12\.self_attn\.q_proj\.weight' }
+  - concat: { from: ['tmp_12_q_a', 'tmp_12_q_b'], to: 'model.layers.12.self_attn.q_proj.weight', dim: 0 }
+  - copy: { from: 'model\.layers\.12\.self_attn\.k_proj\.weight::[:640, :]', to: 'tmp_12_k_a' }
+  - copy: { from: 'model\.layers\.12\.self_attn\.k_proj\.weight::[768:, :]', to: 'tmp_12_k_b' }
+  - delete: { target: 'model\.layers\.12\.self_attn\.k_proj\.weight' }
+  - concat: { from: ['tmp_12_k_a', 'tmp_12_k_b'], to: 'model.layers.12.self_attn.k_proj.weight', dim: 0 }
+  - copy: { from: 'model\.layers\.12\.self_attn\.v_proj\.weight::[:640, :]', to: 'tmp_12_v_a' }
+  - copy: { from: 'model\.layers\.12\.self_attn\.v_proj\.weight::[768:, :]', to: 'tmp_12_v_b' }
+  - delete: { target: 'model\.layers\.12\.self_attn\.v_proj\.weight' }
+  - concat: { from: ['tmp_12_v_a', 'tmp_12_v_b'], to: 'model.layers.12.self_attn.v_proj.weight', dim: 0 }
+  - copy: { from: 'model\.layers\.12\.self_attn\.o_proj\.weight::[:, :640]', to: 'tmp_12_o_a' }
+  - copy: { from: 'model\.layers\.12\.self_attn\.o_proj\.weight::[:, 768:]', to: 'tmp_12_o_b' }
+  - delete: { target: 'model\.layers\.12\.self_attn\.o_proj\.weight' }
+  - concat: { from: ['tmp_12_o_a', 'tmp_12_o_b'], to: 'model.layers.12.self_attn.o_proj.weight', dim: 1 }
+  - copy: { from: 'model\.layers\.13\.self_attn\.q_proj\.weight::[:640, :]', to: 'tmp_13_q_a' }
+  - copy: { from: 'model\.layers\.13\.self_attn\.q_proj\.weight::[768:, :]', to: 'tmp_13_q_b' }
+  - delete: { target: 'model\.layers\.13\.self_attn\.q_proj\.weight' }
+  - concat: { from: ['tmp_13_q_a', 'tmp_13_q_b'], to: 'model.layers.13.self_attn.q_proj.weight', dim: 0 }
+  - copy: { from: 'model\.layers\.13\.self_attn\.k_proj\.weight::[:640, :]', to: 'tmp_13_k_a' }
+  - copy: { from: 'model\.layers\.13\.self_attn\.k_proj\.weight::[768:, :]', to: 'tmp_13_k_b' }
+  - delete: { target: 'model\.layers\.13\.self_attn\.k_proj\.weight' }
+  - concat: { from: ['tmp_13_k_a', 'tmp_13_k_b'], to: 'model.layers.13.self_attn.k_proj.weight', dim: 0 }
+  - copy: { from: 'model\.layers\.13\.self_attn\.v_proj\.weight::[:640, :]', to: 'tmp_13_v_a' }
+  - copy: { from: 'model\.layers\.13\.self_attn\.v_proj\.weight::[768:, :]', to: 'tmp_13_v_b' }
+  - delete: { target: 'model\.layers\.13\.self_attn\.v_proj\.weight' }
+  - concat: { from: ['tmp_13_v_a', 'tmp_13_v_b'], to: 'model.layers.13.self_attn.v_proj.weight', dim: 0 }
+  - copy: { from: 'model\.layers\.13\.self_attn\.o_proj\.weight::[:, :640]', to: 'tmp_13_o_a' }
+  - copy: { from: 'model\.layers\.13\.self_attn\.o_proj\.weight::[:, 768:]', to: 'tmp_13_o_b' }
+  - delete: { target: 'model\.layers\.13\.self_attn\.o_proj\.weight' }
+  - concat: { from: ['tmp_13_o_a', 'tmp_13_o_b'], to: 'model.layers.13.self_attn.o_proj.weight', dim: 1 }
+  - copy: { from: 'model\.layers\.14\.self_attn\.q_proj\.weight::[:640, :]', to: 'tmp_14_q_a' }
+  - copy: { from: 'model\.layers\.14\.self_attn\.q_proj\.weight::[768:, :]', to: 'tmp_14_q_b' }
+  - delete: { target: 'model\.layers\.14\.self_attn\.q_proj\.weight' }
+  - concat: { from: ['tmp_14_q_a', 'tmp_14_q_b'], to: 'model.layers.14.self_attn.q_proj.weight', dim: 0 }
+  - copy: { from: 'model\.layers\.14\.self_attn\.k_proj\.weight::[:640, :]', to: 'tmp_14_k_a' }
+  - copy: { from: 'model\.layers\.14\.self_attn\.k_proj\.weight::[768:, :]', to: 'tmp_14_k_b' }
+  - delete: { target: 'model\.layers\.14\.self_attn\.k_proj\.weight' }
+  - concat: { from: ['tmp_14_k_a', 'tmp_14_k_b'], to: 'model.layers.14.self_attn.k_proj.weight', dim: 0 }
+  - copy: { from: 'model\.layers\.14\.self_attn\.v_proj\.weight::[:640, :]', to: 'tmp_14_v_a' }
+  - copy: { from: 'model\.layers\.14\.self_attn\.v_proj\.weight::[768:, :]', to: 'tmp_14_v_b' }
+  - delete: { target: 'model\.layers\.14\.self_attn\.v_proj\.weight' }
+  - concat: { from: ['tmp_14_v_a', 'tmp_14_v_b'], to: 'model.layers.14.self_attn.v_proj.weight', dim: 0 }
+  - copy: { from: 'model\.layers\.14\.self_attn\.o_proj\.weight::[:, :640]', to: 'tmp_14_o_a' }
+  - copy: { from: 'model\.layers\.14\.self_attn\.o_proj\.weight::[:, 768:]', to: 'tmp_14_o_b' }
+  - delete: { target: 'model\.layers\.14\.self_attn\.o_proj\.weight' }
+  - concat: { from: ['tmp_14_o_a', 'tmp_14_o_b'], to: 'model.layers.14.self_attn.o_proj.weight', dim: 1 }
+  - copy: { from: 'model\.layers\.15\.self_attn\.q_proj\.weight::[:640, :]', to: 'tmp_15_q_a' }
+  - copy: { from: 'model\.layers\.15\.self_attn\.q_proj\.weight::[768:, :]', to: 'tmp_15_q_b' }
+  - delete: { target: 'model\.layers\.15\.self_attn\.q_proj\.weight' }
+  - concat: { from: ['tmp_15_q_a', 'tmp_15_q_b'], to: 'model.layers.15.self_attn.q_proj.weight', dim: 0 }
+  - copy: { from: 'model\.layers\.15\.self_attn\.k_proj\.weight::[:640, :]', to: 'tmp_15_k_a' }
+  - copy: { from: 'model\.layers\.15\.self_attn\.k_proj\.weight::[768:, :]', to: 'tmp_15_k_b' }
+  - delete: { target: 'model\.layers\.15\.self_attn\.k_proj\.weight' }
+  - concat: { from: ['tmp_15_k_a', 'tmp_15_k_b'], to: 'model.layers.15.self_attn.k_proj.weight', dim: 0 }
+  - copy: { from: 'model\.layers\.15\.self_attn\.v_proj\.weight::[:640, :]', to: 'tmp_15_v_a' }
+  - copy: { from: 'model\.layers\.15\.self_attn\.v_proj\.weight::[768:, :]', to: 'tmp_15_v_b' }
+  - delete: { target: 'model\.layers\.15\.self_attn\.v_proj\.weight' }
+  - concat: { from: ['tmp_15_v_a', 'tmp_15_v_b'], to: 'model.layers.15.self_attn.v_proj.weight', dim: 0 }
+  - copy: { from: 'model\.layers\.15\.self_attn\.o_proj\.weight::[:, :640]', to: 'tmp_15_o_a' }
+  - copy: { from: 'model\.layers\.15\.self_attn\.o_proj\.weight::[:, 768:]', to: 'tmp_15_o_b' }
+  - delete: { target: 'model\.layers\.15\.self_attn\.o_proj\.weight' }
+  - concat: { from: ['tmp_15_o_a', 'tmp_15_o_b'], to: 'model.layers.15.self_attn.o_proj.weight', dim: 1 }
+  - delete: { target: 'tmp_.*' }
+  - assert: { shape: { of: 'model\.layers\.0\.self_attn\.q_proj\.weight', is: [1920, 2048] } }
+  - assert: { shape: { of: 'model\.layers\.0\.self_attn\.k_proj\.weight', is: [1920, 2048] } }
+  - assert: { shape: { of: 'model\.layers\.0\.self_attn\.v_proj\.weight', is: [1920, 2048] } }
+  - assert: { shape: { of: 'model\.layers\.0\.self_attn\.o_proj\.weight', is: [2048, 1920] } }
+  - assert: { count: { of: '.*', is: 114 } }
+
+output:
+  path: out/T2/model.safetensors
+  format: safetensors

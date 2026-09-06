@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/pythia-1b/P/T1-defective.py",
+  "started_at": "2026-09-06T00:55:58+00:00",
+  "finished_at": "2026-09-06T00:56:05+00:00",
+  "wall_clock_s": 7.0,
+  "tokens_in": 2,
+  "tokens_out": 270,
+  "cost_usd": 0.192951,
+  "verdict_text": "NO\n\nThe script drops blocks {2, 6, 10, 15} instead of the required {2, 6, 10, 14}, violating \"Required result\" clause 1. As a consequence the renumbering also disagrees with clause 2: old 14 is kept and becomes 11, while the spec requires old 14 removed and old 15 to become 11. The output will still contain 12 layers and 184 tensors, so the built-in asserts pass, but the values of the last block differ from the reference and grading will fail on bit-exact comparison. The required checks are also incomplete: nothing explicitly verifies that no tensor of blocks 12-15 remains, and the tensor-count assertion happens before writing but there is no check that exactly 12 tensors match the query_key_value weight pattern, though the layer-index set check is an acceptable equivalent.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The drop set is off by one: the last dropped block is the one after the specified block (for example blocks 2, 5, 9 instead of 2, 5, 8). Block counts still match, so the artifact's own checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

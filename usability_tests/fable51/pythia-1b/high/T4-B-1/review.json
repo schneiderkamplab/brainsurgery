@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/pythia-1b/B/T4-defective.yaml",
+  "started_at": "2026-09-06T01:50:18+00:00",
+  "finished_at": "2026-09-06T01:50:47+00:00",
+  "wall_clock_s": 28.8,
+  "tokens_in": 2,
+  "tokens_out": 2125,
+  "cost_usd": 0.307412,
+  "verdict_text": "NO\n\nThe second task vector is computed against the already-merged base: the first `add_` folds `0.4 * (ft1 - base)` into the base MLP tensors, and only then does the plan copy ft2 and run `subtract_` with `from: base`, so `tv2 = ft2 - (base + 0.4*tv1)` rather than `ft2 - base`. The result is `base + 0.24*(ft1 - base) + 0.4*(ft2 - base)`, which violates step 2 of \"Required result\" and is exactly the ordering hazard the specification calls out. Separately, the \"Required checks\" clause demanding a loud failure unless exactly 64 tensors were merged has no corresponding assert (no count on the MLP or `.tv1`/`.tv2` patterns), so a partial match would pass silently. The name-set verification in step 1 is also incomplete: counting 244 tensors in ft1/ft2 plus equality on the 180 non-MLP names does not confirm the 64 MLP names exist in the fine-tunes.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "Task vector 2 is computed against the base after task vector 1 has already been added, so the second delta is taken from the wrong reference point.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/B/T5-defective.yaml",
+  "started_at": "2026-09-06T01:20:22+00:00",
+  "finished_at": "2026-09-06T01:20:30+00:00",
+  "wall_clock_s": 7.7,
+  "tokens_in": 2,
+  "tokens_out": 332,
+  "cost_usd": 0.19345399999999996,
+  "verdict_text": "NO\n\nThe plan adds the unscaled low-rank product: after `matmul` and `permute`, the `add_` step folds `(B @ A).T` into `h.<i>.attn.c_attn.weight` without multiplying by `scale = lora_alpha / r = 2`. This violates Required result clause 1, which requires `h.<i>.<module>.weight += scale * (B @ A).T`. The merged weights will differ from the reference by a factor of 2 on the delta, far exceeding the 1e-5 relative Frobenius tolerance in the Grading section. A secondary concern is that `shard: 100MB` may be interpreted as 100,000,000 bytes rather than the required 104,857,600-byte limit, but the missing scale alone makes the artifact incorrect.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The adapter scaling factor alpha / r is missing: the raw low-rank product is added.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

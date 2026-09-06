@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/P/T4-defective.py",
+  "started_at": "2026-09-05T21:35:28+00:00",
+  "finished_at": "2026-09-05T21:35:40+00:00",
+  "wall_clock_s": 12.1,
+  "tokens_in": 2,
+  "tokens_out": 1097,
+  "cost_usd": 0.045769800000000006,
+  "verdict_text": "NO\n\nThe artifact computes the fine-tune-2 task vector against the already-updated `tmp` (which already contains the ft1 merge) instead of against the unmodified `base`: `out = tmp + LAMBDA*(f2 - tmp)` where `tmp = base + LAMBDA*(f1-base)`. Expanding gives `out = 0.36*base + 0.24*ft1 + 0.4*ft2`, whereas the spec's step 2 formula `base + lambda*(ft1-base) + lambda*(ft2-base)` reduces to `0.2*base + 0.4*ft1 + 0.4*ft2`. This is exactly the ordering hazard the spec warns about (\"each task vector must be taken against the unmodified base, not against a base that the first merge already changed\"), and the resulting values will differ from the correct merge by an amount well outside the 1e-5 relative-Frobenius tolerance for the 48 merged tensors.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "Task vector 2 is computed against the base after task vector 1 has already been added, so the second delta is taken from the wrong reference point.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

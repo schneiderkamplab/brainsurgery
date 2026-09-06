@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/pythia-1b/B/T4-defective.yaml",
+  "started_at": "2026-09-06T00:16:46+00:00",
+  "finished_at": "2026-09-06T00:17:16+00:00",
+  "wall_clock_s": 29.9,
+  "tokens_in": 2,
+  "tokens_out": 2224,
+  "cost_usd": 0.15903250000000002,
+  "verdict_text": "NO\n\nThe second task vector is taken against an already-merged base, which is exactly the ordering hazard clause 2 forbids: the `add_` of `tv1` writes `base = base + 0.4*(ft1 - base)` before the second `subtract_` computes `tv2 = ft2 - base`, so the final result is `base + 0.4*(ft1-base) + 0.4*(ft2-base) - 0.16*(ft1-base)`, short of the required value by `0.16*(ft1-base)` on all 64 MLP tensors (well beyond the 1e-3 relative Frobenius tolerance unless the task vectors are negligible). The required check \"exactly 64 tensors were merged\" is also absent \u2014 nothing asserts the count of matched MLP tensors, so a regex that silently matched fewer (or more) would pass unnoticed. The step-1 verification is likewise incomplete: it asserts 244 tensors in `ft1` and `ft2` and compares base's non-MLP tensors to both, but never asserts that `base` itself has 244 tensors before editing, so a base with extra tensors would not be caught by the name-set check (only incidentally by the post-merge 244 count). The float32 arithmetic, the float16 cast-back, the tv scratch-tensor cleanup, and the 244-tensor output check are correct.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "Task vector 2 is computed against the base after task vector 1 has already been added, so the second delta is taken from the wrong reference point.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

@@ -1,0 +1,62 @@
+# T4: task-vector merge of two fine-tunes into the Pythia-1B base (lambda = 0.4).
+# All edits happen on the `base` alias so the output alias is unambiguous.
+inputs:
+  - base::inputs/base/model.safetensors
+  - ft1::inputs/ft1/model.safetensors
+  - ft2::inputs/ft2/model.safetensors
+
+transforms:
+  # ---- Step 1: verify layout before touching anything -----------------------
+  # Same tensor count in all three checkpoints.
+  - assert: { count: { of: 'base::.*', is: 244 } }
+  - assert: { count: { of: 'ft1::.*', is: 244 } }
+  - assert: { count: { of: 'ft2::.*', is: 244 } }
+  # Exactly 64 MLP tensors in each checkpoint.
+  - assert: { count: { of: 'base::gpt_neox\.layers\.\d+\.mlp\..+', is: 64 } }
+  - assert: { count: { of: 'ft1::gpt_neox\.layers\.\d+\.mlp\..+', is: 64 } }
+  - assert: { count: { of: 'ft2::gpt_neox\.layers\.\d+\.mlp\..+', is: 64 } }
+  # Every non-MLP tensor of each fine-tune exists in base with identical shape,
+  # dtype and values (180 tensors each). Together with the counts above this
+  # also proves the three name sets coincide.
+  - assert: { equal: { left: 'ft1::(?!gpt_neox\.layers\.\d+\.mlp\.).+', right: 'base::\g<0>' } }
+  - assert: { equal: { left: 'ft2::(?!gpt_neox\.layers\.\d+\.mlp\.).+', right: 'base::\g<0>' } }
+  # The MLP tensors exist under the same names with the same shape/dtype in the
+  # fine-tunes (large eps: only name/shape/dtype are being checked here).
+  - assert: { equal: { left: 'base::(gpt_neox\.layers\.\d+\.mlp\..+)', right: 'ft1::\1', eps: 1.0e9 } }
+  - assert: { equal: { left: 'base::(gpt_neox\.layers\.\d+\.mlp\..+)', right: 'ft2::\1', eps: 1.0e9 } }
+
+  # ---- Step 2: merge in float32 on temporaries under the base alias ---------
+  # acc = base[X] (f32); d1 = ft1[X] (f32); d2 = ft2[X] (f32)
+  - cast: { from: 'base::(gpt_neox\.layers\.\d+\.mlp\..+)', to: 'base::tmp.acc.\1', dtype: float32 }
+  - cast: { from: 'ft1::(gpt_neox\.layers\.\d+\.mlp\..+)', to: 'base::tmp.d1.\1', dtype: float32 }
+  - cast: { from: 'ft2::(gpt_neox\.layers\.\d+\.mlp\..+)', to: 'base::tmp.d2.\1', dtype: float32 }
+  # Task vectors against the unmodified base: d1 = ft1 - base, d2 = ft2 - base
+  - subtract_: { from: 'base::tmp\.acc\.(.+)', to: 'base::tmp.d1.\1' }
+  - subtract_: { from: 'base::tmp\.acc\.(.+)', to: 'base::tmp.d2.\1' }
+  # Scale by lambda
+  - scale_: { target: 'base::tmp\.d[12]\..+', by: 0.4 }
+  # acc = base + 0.4*d1 + 0.4*d2
+  - add_: { from: 'base::tmp\.d1\.(.+)', to: 'base::tmp.acc.\1' }
+  - add_: { from: 'base::tmp\.d2\.(.+)', to: 'base::tmp.acc.\1' }
+  # Sanity: exactly 64 accumulators were produced
+  - assert: { count: { of: 'base::tmp\.acc\..+', is: 64 } }
+  # Cast back to float16 and write into the original slots
+  - cast_: { target: 'base::tmp\.acc\..+', to: float16 }
+  - assign: { from: 'base::tmp\.acc\.(.+)', to: 'base::\1' }
+  # Drop temporaries
+  - delete: { target: 'base::tmp\..+' }
+
+  # ---- Required checks ------------------------------------------------------
+  # Exactly 64 tensors were merged: the 64 MLP tensors were written exactly once
+  # (assign), and nothing else on base was written.
+  - assert: { count: { of: 'base::gpt_neox\.layers\.\d+\.mlp\..+', is: 64 } }
+  - assert: { writes: { of: 'base::gpt_neox\.layers\.\d+\.mlp\..+', is: 2 } }
+  - assert: { writes: { of: 'base::(?!gpt_neox\.layers\.\d+\.mlp\.).+', le: 1 } }
+  - assert: { dtype: { of: 'base::gpt_neox\.layers\.\d+\.mlp\..+', is: float16 } }
+  # Output has exactly 244 tensors and no leftover temporaries.
+  - assert: { count: { of: 'base::.*', is: 244 } }
+  - assert: { not: { exists: 'base::tmp\..+' } }
+
+output:
+  path: out/T4/model.safetensors
+  format: safetensors

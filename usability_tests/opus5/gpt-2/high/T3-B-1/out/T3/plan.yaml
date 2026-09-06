@@ -1,0 +1,49 @@
+# T3: mixed-precision export with sharding (GPT-2 124M)
+#
+# - the 48 projection matrices (h.<i>.{attn.c_attn,attn.c_proj,mlp.c_fc,mlp.c_proj}.weight)
+#   are cast to bfloat16 in place;
+# - the 12 causal-mask buffers h.<i>.attn.bias are deleted (note: this pattern must not
+#   catch the projection biases h.<i>.attn.c_attn.bias / h.<i>.attn.c_proj.bias);
+# - everything else stays float32 with untouched values;
+# - the result is written as a sharded safetensors checkpoint with a 64 MiB budget.
+
+inputs:
+  - model::inputs/base/model.safetensors
+
+transforms:
+  # --- 1. drop the non-parameter causal-mask buffers -------------------------
+  - assert: { count: { of: 'h\.\d+\.attn\.bias', is: 12 } }
+  - assert: { shape: { of: 'h\.\d+\.attn\.bias', is: [1, 1, 1024, 1024] } }
+  - delete: { target: 'h\.\d+\.attn\.bias' }
+
+  # --- 2. cast exactly the projection matrices to bfloat16 ------------------
+  - assert:
+      count:
+        of: 'h\.\d+\.(attn\.c_attn|attn\.c_proj|mlp\.c_fc|mlp\.c_proj)\.weight'
+        is: 48
+  - cast_:
+      target: 'h\.\d+\.(attn\.c_attn|attn\.c_proj|mlp\.c_fc|mlp\.c_proj)\.weight'
+      to: bfloat16
+
+  # --- 3. required checks, all evaluated before the output is written -------
+  - assert:
+      all:
+        # exactly 48 tensors are bfloat16: the 48 projections are bfloat16 ...
+        - count:
+            of: 'h\.\d+\.(attn\.c_attn|attn\.c_proj|mlp\.c_fc|mlp\.c_proj)\.weight'
+            is: 48
+        - dtype:
+            of: 'h\.\d+\.(attn\.c_attn|attn\.c_proj|mlp\.c_fc|mlp\.c_proj)\.weight'
+            is: bfloat16
+        # ... and every tensor that is not one of them is float32
+        - dtype:
+            of: '(?!h\.\d+\.(attn\.c_attn|attn\.c_proj|mlp\.c_fc|mlp\.c_proj)\.weight$).*'
+            is: float32
+        - dtype: { of: 'h\.0\.attn\.c_attn\.weight', is: bfloat16 }
+        - dtype: { of: 'wte\.weight', is: float32 }
+        - count: { of: '.*', is: 148 }
+
+output:
+  path: out/T3
+  format: safetensors
+  shard: 64MB

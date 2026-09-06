@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/pythia-1b/P/T2-defective.py",
+  "started_at": "2026-09-05T21:23:07+00:00",
+  "finished_at": "2026-09-05T21:23:12+00:00",
+  "wall_clock_s": 4.9,
+  "tokens_in": 2,
+  "tokens_out": 176,
+  "cost_usd": 0.039815800000000005,
+  "verdict_text": "NO\n\nThe script drops head index 6 (DROP_HEAD = 6), but the specification requires removing head 5. This violates the \"Required result\" section's opening instruction (\"For every layer `i`, remove head 5\") and consequently produces wrong row/column keep-ranges (it keeps rows/cols corresponding to skipping block 6, not block 5), so the output values will not match the required slices (`0..3839,4608..6143` for rows, `0..1279,1536..2047` for columns) even though the resulting shapes happen to be correct.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The removed head is off by one (head N+1 instead of head N). All shapes are still correct, so the artifact's own shape checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

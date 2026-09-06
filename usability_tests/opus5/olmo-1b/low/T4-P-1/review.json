@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/P/T4-defective.py",
+  "started_at": "2026-09-05T22:54:09+00:00",
+  "finished_at": "2026-09-05T22:54:18+00:00",
+  "wall_clock_s": 8.6,
+  "tokens_in": 2,
+  "tokens_out": 466,
+  "cost_usd": 0.0952355,
+  "verdict_text": "NO\n\nThe merge arithmetic takes the second task vector against the already-merged tensor rather than against the unmodified base: it computes `tmp = base + \u03bb(ft1-base)` and then `tmp + \u03bb(ft2-tmp)`, which equals `base + \u03bb(ft1-base) + \u03bb(ft2-base) - \u03bb\u00b2(ft1-base)`. That is short of the required result by `0.16*(ft1-base)` on every one of the 48 MLP tensors, violating clause 2 of \"Required result\" (and the explicitly warned-about ordering hazard: each task vector must be taken against the unmodified base). Since 0.16 times a real task vector is far above the 1e-5 relative Frobenius tolerance, grading of the 48 merged tensors will fail. Everything else \u2014 key-set and shared-tensor verification, the 48/114 counts, unchanged tensors copied from base, single output file \u2014 matches the specification.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "Task vector 2 is computed against the base after task vector 1 has already been added, so the second delta is taken from the wrong reference point.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

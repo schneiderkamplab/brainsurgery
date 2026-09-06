@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/pythia-1b/B/T5-defective.yaml",
+  "started_at": "2026-09-06T00:18:00+00:00",
+  "finished_at": "2026-09-06T00:18:09+00:00",
+  "wall_clock_s": 9.2,
+  "tokens_in": 2,
+  "tokens_out": 591,
+  "cost_usd": 0.10799150000000002,
+  "verdict_text": "NO\n\nThe plan never applies the LoRA scaling factor `scale = lora_alpha / r = 2`: it computes `delta = B @ A` with `matmul` and adds it directly, so every merged weight receives half the required delta. This violates Required result clause 1 (`weight += scale * B @ A`), and the resulting relative Frobenius error on the 16 merged tensors will be far above the 1e-3 grading tolerance. The plan's own comment (`# defect: the alpha / r scale is missing`) acknowledges the omission. Everything else lines up: no transposition is correct for `fan_in_fan_out = false`, the float32 cast/add/cast-back matches the dtype requirement, the deltas are deleted before output, and all four required checks are present as `assert` transforms. One secondary risk worth flagging: `shard: 512MB` may be interpreted as 512,000,000 bytes rather than the 512 MiB (536,870,912 bytes) the specification requires, which could change shard boundaries even after the scale is fixed.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The adapter scaling factor alpha / r is missing: the raw low-rank product is added.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

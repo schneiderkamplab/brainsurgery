@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/pythia-1b/B/T1-defective.yaml",
+  "started_at": "2026-09-05T21:24:10+00:00",
+  "finished_at": "2026-09-05T21:24:17+00:00",
+  "wall_clock_s": 7.7,
+  "tokens_in": 2,
+  "tokens_out": 447,
+  "cost_usd": 0.0447198,
+  "verdict_text": "NO\n\nThe plan deletes blocks 2, 6, 10, **15** instead of 2, 6, 10, **14** as required by clause 1, and then moves old block 14 (which should have been deleted) into new slot 11 instead of old block 15. This violates Required result clauses 1 and 2: block 14 survives in the output while block 15's tensors are permanently discarded, so new layer 11 will contain the wrong weights (old block 14's values, not old block 15's). The asserts only check that blocks 12\u201315 are absent and that there are 12 blocks/184 tensors total \u2014 they don't detect that the *wrong* block was kept, so the plan passes its own checks while still producing bit-wise incorrect content per the grading criterion (exact values matching the hidden reference).",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The drop set is off by one: the last dropped block is the one after the specified block (for example blocks 2, 5, 9 instead of 2, 5, 8). Block counts still match, so the artifact's own checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

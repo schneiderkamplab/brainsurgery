@@ -1,0 +1,80 @@
+inputs:
+  - base::inputs/base/model.safetensors
+  - ft1::inputs/ft1/model.safetensors
+  - ft2::inputs/ft2/model.safetensors
+
+output:
+  path: out/T4/model.safetensors
+  format: safetensors
+
+transforms:
+  # --- Step 1: verify the three checkpoints agree everywhere except the 48
+  # MLP tensors, before touching anything. ---
+
+  # Same total tensor count in all three checkpoints.
+  - assert: { count: { of: 'base::.*', is: 160 } }
+  - assert: { count: { of: 'ft1::.*', is: 160 } }
+  - assert: { count: { of: 'ft2::.*', is: 160 } }
+
+  # Same 48-tensor MLP naming scheme in all three checkpoints.
+  - assert: { count: { of: 'base::h\.\d+\.mlp\.(?:c_fc|c_proj)\.(?:weight|bias)', is: 48 } }
+  - assert: { count: { of: 'ft1::h\.\d+\.mlp\.(?:c_fc|c_proj)\.(?:weight|bias)', is: 48 } }
+  - assert: { count: { of: 'ft2::h\.\d+\.mlp\.(?:c_fc|c_proj)\.(?:weight|bias)', is: 48 } }
+
+  # Every tensor outside the MLP tensors is bit-identical across all three
+  # checkpoints (base vs ft1, base vs ft2; equality is then transitive).
+  - assert:
+      equal:
+        left: 'base::(?!h\.\d+\.mlp\.).+'
+        right: 'ft1::\g<0>'
+  - assert:
+      equal:
+        left: 'base::(?!h\.\d+\.mlp\.).+'
+        right: 'ft2::\g<0>'
+
+  # --- Step 2: compute task vectors against the unmodified base, scaled by
+  # lambda = 0.4, before base is changed. Scratch tensors live under the
+  # 'base' alias (prefixed tv1__/tv2__) so the output alias stays unambiguous. ---
+
+  - copy:
+      from: 'base::(h\.\d+\.mlp\.(?:c_fc|c_proj)\.(?:weight|bias))'
+      to: 'base::tv1__\1'
+  - subtract:
+      from_a: 'ft1::(h\.\d+\.mlp\.(?:c_fc|c_proj)\.(?:weight|bias))'
+      from_b: 'base::\1'
+      to: 'base::tv1__\1'
+
+  - copy:
+      from: 'base::(h\.\d+\.mlp\.(?:c_fc|c_proj)\.(?:weight|bias))'
+      to: 'base::tv2__\1'
+  - subtract:
+      from_a: 'ft2::(h\.\d+\.mlp\.(?:c_fc|c_proj)\.(?:weight|bias))'
+      from_b: 'base::\1'
+      to: 'base::tv2__\1'
+
+  - scale_:
+      target: 'base::tv1__h\.\d+\.mlp\.(?:c_fc|c_proj)\.(?:weight|bias)'
+      by: 0.4
+  - scale_:
+      target: 'base::tv2__h\.\d+\.mlp\.(?:c_fc|c_proj)\.(?:weight|bias)'
+      by: 0.4
+
+  # Exactly 48 tensors were merged per task vector.
+  - assert: { count: { of: 'base::tv1__.*', is: 48 } }
+  - assert: { count: { of: 'base::tv2__.*', is: 48 } }
+
+  # --- Step 3: merge into base in place: out = base + lambda*(ft1-base) + lambda*(ft2-base) ---
+
+  - add_:
+      from: 'base::tv1__(h\.\d+\.mlp\.(?:c_fc|c_proj)\.(?:weight|bias))'
+      to: 'base::\1'
+  - add_:
+      from: 'base::tv2__(h\.\d+\.mlp\.(?:c_fc|c_proj)\.(?:weight|bias))'
+      to: 'base::\1'
+
+  # Drop the scratch task-vector tensors; every other tensor is base, unchanged.
+  - delete: { target: 'base::tv1__.*' }
+  - delete: { target: 'base::tv2__.*' }
+
+  # --- Step 4: output must have exactly 160 tensors. ---
+  - assert: { count: { of: 'base::.*', is: 160 } }

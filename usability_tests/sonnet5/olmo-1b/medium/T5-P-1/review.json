@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/P/T5-defective.py",
+  "started_at": "2026-09-05T21:48:12+00:00",
+  "finished_at": "2026-09-05T21:48:17+00:00",
+  "wall_clock_s": 4.8,
+  "tokens_in": 2,
+  "tokens_out": 171,
+  "cost_usd": 0.0397628,
+  "verdict_text": "NO\n\nThe script sets `scale = 1.0` with an explicit comment \"defect: alpha / r forgotten,\" instead of computing `scale = lora_alpha / r = 2`. This violates Required Result clause 1, which mandates `weight += scale * B @ A` with `scale = lora_alpha / r = 2`; using scale 1.0 instead of 2.0 will produce merged weights that fail the grading tolerance (relative Frobenius error \u2264 1e-5) for all 32 adapted tensors.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The adapter scaling factor alpha / r is missing: the raw low-rank product is added.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

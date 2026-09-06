@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/B/T1-defective.yaml",
+  "started_at": "2026-09-05T21:42:16+00:00",
+  "finished_at": "2026-09-05T21:42:26+00:00",
+  "wall_clock_s": 10.9,
+  "tokens_in": 2,
+  "tokens_out": 880,
+  "cost_usd": 0.0463288,
+  "verdict_text": "NO\n\nThe artifact deletes blocks 2, 6, 10, **15** and then moves block 14 into slot 11 (`model\\.layers\\.14\\.(.*)` \u2192 `model.layers.11.\\1`), but the specification's \"Required result\" \u00a71 requires deleting blocks 2, 6, 10, **14**, with old block 15 (not 14) surviving and becoming new index 11 (\u00a72: \"old 15 becomes 11\"). This swaps which of blocks 14/15 is dropped and which is kept, so the final `model.layers.11.*` tensors will contain old block 14's weights instead of old block 15's weights \u2014 wrong values despite passing all three required-check assertions (count of deleted range, 12-block count, 86-tensor total), since those checks don't distinguish 14 from 15. This will fail the hidden bit-exact grading in \"Grading.\"",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The drop set is off by one: the last dropped block is the one after the specified block (for example blocks 2, 5, 9 instead of 2, 5, 8). Block counts still match, so the artifact's own checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

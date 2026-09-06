@@ -1,0 +1,33 @@
+inputs:
+  - model::inputs/base/model.safetensors
+
+transforms:
+  - assert: { count: { of: '.*', is: 160 } }
+
+  # 1. drop blocks 2, 5, 8
+  - delete: { target: 'h\.2\..*' }
+  - delete: { target: 'h\.5\..*' }
+  - delete: { target: 'h\.8\..*' }
+
+  # 2. renumber survivors in ascending order (destination always already free)
+  - move: { from: 'h\.3\.(.*)', to: 'h.2.\1' }
+  - move: { from: 'h\.4\.(.*)', to: 'h.3.\1' }
+  - move: { from: 'h\.6\.(.*)', to: 'h.4.\1' }
+  - move: { from: 'h\.7\.(.*)', to: 'h.5.\1' }
+  - move: { from: 'h\.9\.(.*)', to: 'h.6.\1' }
+  - move: { from: 'h\.10\.(.*)', to: 'h.7.\1' }
+  - move: { from: 'h\.11\.(.*)', to: 'h.8.\1' }
+
+  # 3. required checks
+  - assert: { not: { exists: 'h\.(9|10|11)\..*' } }
+  - assert: { count: { of: 'h\.\d+\.attn\.c_attn\.weight', is: 9 } }
+  - assert: { count: { of: 'h\.\d+\..*', is: 117 } }
+  - assert: { count: { of: '.*', is: 121 } }
+  - assert: { exists: 'wte.weight' }
+  - assert: { exists: 'wpe.weight' }
+  - assert: { exists: 'ln_f.weight' }
+  - assert: { exists: 'ln_f.bias' }
+
+output:
+  path: out/T1/model.safetensors
+  format: safetensors

@@ -1,0 +1,41 @@
+{
+  "phase": "solve",
+  "driver": "run_claude.py",
+  "model_id": "claude-sonnet-5",
+  "agent": "sonnet5",
+  "target": "gpt-2",
+  "effort": "low",
+  "test": "T3",
+  "condition": "F",
+  "repeat": 1,
+  "started_at": "2026-09-05T21:07:22+00:00",
+  "finished_at": "2026-09-05T21:08:36+00:00",
+  "wall_clock_s": 73.5,
+  "exit_code": 0,
+  "cap_hit": "none",
+  "max_turns": 40,
+  "timeout_s": 1800,
+  "turns": 10,
+  "tool_calls": 9,
+  "tokens_in": 20,
+  "tokens_out": 5103,
+  "cache_read_tokens": 263758,
+  "cache_write_tokens": 20205,
+  "tokens_in_total": 283983,
+  "cost_usd": 0.18697260000000002,
+  "duration_api_ms": 61260,
+  "session_id": "ba571c58-ed07-4611-9170-fa414353949c",
+  "result_subtype": "success",
+  "executions": 2,
+  "failed_executions": [
+    {
+      "n": 1,
+      "command": "python -c \"import torch, safetensors\" && python out/T3/solution.py",
+      "message": "FileNotFoundError: No such file or directory: \"/home/rootkidd/Projects/brainsurgery/usability_tests/sonnet5/gpt-2/low/inputs/base/model.safetensors\"",
+      "error_class": ""
+    }
+  ],
+  "first_execution_success": false,
+  "executions_until_first_success": 2,
+  "final_text": "Task complete. Summary:\n\n- **Solution:** `out/T3/solution.py` \u2014 a plain script using `torch` + `safetensors` (no mergekit/torch-state-bridge needed since exact tensor names were given, not patterns).\n- Casts exactly the 48 named projection matrices to bfloat16, keeps everything else float32 unchanged, drops the 12 `h.<i>.attn.bias` buffers, and shards output at \u226464 MiB tensor-data per shard (oversized `wte.weight` alone in its own shard).\n- Built-in assertions fail loudly before writing if any required check doesn't hold (48 bf16 count, `h.0.attn.c_attn.weight` bf16, `wte.weight` fp32, 148 total tensors).\n- Ran it twice: first run crashed on a path bug (`FileNotFoundError`, off-by-one in `Path.parents[]`), fixed, second run succeeded and I verified the output independently (dtype counts, no `attn.bias` keys, shard sizes).\n- `out/T3/REPORT.md` written with the self-report."
+}

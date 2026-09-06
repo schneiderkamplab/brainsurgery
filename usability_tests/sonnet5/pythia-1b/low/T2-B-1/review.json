@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/pythia-1b/B/T2-defective.yaml",
+  "started_at": "2026-09-05T21:25:16+00:00",
+  "finished_at": "2026-09-05T21:25:28+00:00",
+  "wall_clock_s": 11.1,
+  "tokens_in": 2,
+  "tokens_out": 256,
+  "cost_usd": 0.06520480000000001,
+  "verdict_text": "NO\n\nThe artifact removes head 6 (rows 4608:5375), not head 5 as required by the spec's \"remove head 5\" instruction, which specifies keeping rows `0..3839` and `4608..6143`. The plan instead keeps rows `0:4608` and `5376:6144` (dropping rows 4608:5375), and correspondingly keeps dense.weight columns `0:1536`+`1792:2048` instead of the required `0..1279`+`1536..2047`. This is a consistent off-by-one-head shift (removing the wrong head's slice throughout), violating Required-result clauses 1\u20133, even though the resulting shapes ([5376,2048], [5376], [2048,1792]) happen to match and the assert checks (which only test shapes, not content) pass.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The removed head is off by one (head N+1 instead of head N). All shapes are still correct, so the artifact's own shape checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

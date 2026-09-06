@@ -1,0 +1,54 @@
+# T1: depth pruning of GPT-2 (124M) -- drop blocks 2, 5, 8 and renumber 0..8.
+inputs:
+  - model::inputs/base/model.safetensors
+
+transforms:
+
+  # Sanity: the input is the 12-layer model (160 tensors, 12 blocks).
+  - assert:
+      all:
+        - count: { of: '.*', is: 160 }
+        - count: { of: 'h\.\d+\.attn\.c_attn\.weight', is: 12 }
+
+  # 1. Remove every tensor of blocks 2, 5, 8 (13 tensors each).
+  - delete: { target: 'h\.(2|5|8)\..*' }
+  - assert:
+      all:
+        - count: { of: '.*', is: 121 }
+        - not: { exists: 'h\.(2|5|8)\..*' }
+
+  # 2. Renumber survivors in ascending order of the *destination* index, so the
+  #    slot each block moves into has already been vacated: no collisions.
+  #    old 0 -> 0, old 1 -> 1 (unchanged), then:
+  - move: { from: 'h\.3\.(.*)',  to: 'h.2.\1' }
+  - move: { from: 'h\.4\.(.*)',  to: 'h.3.\1' }
+  - move: { from: 'h\.6\.(.*)',  to: 'h.4.\1' }
+  - move: { from: 'h\.7\.(.*)',  to: 'h.5.\1' }
+  - move: { from: 'h\.9\.(.*)',  to: 'h.6.\1' }
+  - move: { from: 'h\.10\.(.*)', to: 'h.7.\1' }
+  - move: { from: 'h\.11\.(.*)', to: 'h.8.\1' }
+
+  # Required checks.
+  - assert:
+      all:
+        # no tensor of blocks 9, 10, 11 remains
+        - not: { exists: 'h\.(9|10|11)\..*' }
+        # exactly 9 blocks remain, indices contiguous 0..8
+        - count: { of: 'h\.\d+\.attn\.c_attn\.weight', is: 9 }
+        - count: { of: 'h\.[0-8]\..*', is: 117 }
+        - count: { of: 'h\.\d+\..*', is: 117 }
+        # the output has exactly 121 tensors
+        - count: { of: '.*', is: 121 }
+        # the 4 non-block tensors survive untouched
+        - count: { of: '(wte\.weight|wpe\.weight|ln_f\.weight|ln_f\.bias)', is: 4 }
+        - shape: { of: 'wte.weight', is: [50257, 768] }
+        - shape: { of: 'wpe.weight', is: [1024, 768] }
+        # every surviving block is complete (13 tensors per block)
+        - count: { of: 'h\.\d+\.attn\.bias', is: 9 }
+        - count: { of: 'h\.\d+\.mlp\.c_fc\.weight', is: 9 }
+        - shape: { of: 'h.8.attn.c_attn.weight', is: [768, 2304] }
+        - dtype: { of: '.*', is: float32 }
+
+output:
+  path: out/T1/model.safetensors
+  format: safetensors

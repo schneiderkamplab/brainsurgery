@@ -48,11 +48,16 @@ from targets import TARGETS, TESTS  # noqa: E402
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
 # An "execution" is a Bash command that runs the participant's artifact: the script
-# (python ... solution.py), the plan (brainsurgery ... plan.yaml, as a program, not just
-# the word), a run.sh, or a merge tool invoked on the participant's own config.
+# (python [flags] ... solution.py), the plan (brainsurgery [cli] [flags] ... plan.yaml, as a
+# program, not just the word), a run.sh, or a merge tool. The command may be preceded by
+# a separator, `time`, or environment assignments; reading or editing the file
+# (cat, sed, chmod, wc ...) does not count.
+_PRE = r"(?:^|[;&|(]\s*|\n\s*)(?:time\s+)?(?:\w+=\S+\s+)*(?:\S*/)?"
 EXEC_RE = re.compile(
-    r"(?:^|[;&|(]\s*|\n\s*)(?:\S*/)?(?:python[0-9.]*\s+\S*solution\.py|brainsurgery\s+\S*plan\.yaml"
-    r"|(?:bash\s+|sh\s+|\./)?\S*run\.sh|mergekit-\w+\s)"
+    _PRE + r"(?:python[0-9.]*(?:\s+-\S+)*\s+\S*solution\.py"
+    r"|brainsurgery(?:\s+cli)?(?:\s+-\S+)*\s+\S*plan\.yaml"
+    r"|(?:bash\s+|sh\s+)?(?:\./|\S*/)?run\.sh"
+    r"|mergekit-\w+\s)"
 )
 DEFECT_WORDS = re.compile(
     r"\b(does not|doesn't|do not|don't|not (?:meet|satisfy|match|implement)|incorrect|wrong|bug|defect|"

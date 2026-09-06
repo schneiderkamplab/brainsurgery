@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/pythia-1b/P/T4-defective.py",
+  "started_at": "2026-09-05T22:29:53+00:00",
+  "finished_at": "2026-09-05T22:30:02+00:00",
+  "wall_clock_s": 9.5,
+  "tokens_in": 2,
+  "tokens_out": 845,
+  "cost_usd": 0.044087799999999996,
+  "verdict_text": "NO\n\nThe artifact violates the ordering requirement in step 2 (and the explicitly called-out hazard in \"Why it is meaningful\"): the second task vector is computed against `tmp` (the already-modified intermediate), not against the unmodified `base`. Concretely, `out[X] = tmp + \u03bb(f2 - tmp)` expands to `(1-\u03bb)\u00b2\u00b7base + \u03bb(1-\u03bb)\u00b7ft1 + \u03bb\u00b7ft2`, whereas the spec requires `base + \u03bb(ft1-base) + \u03bb(ft2-base) = (1-2\u03bb)\u00b7base + \u03bb\u00b7ft1 + \u03bb\u00b7ft2`. With \u03bb=0.4 these give base-coefficients of 0.36 vs. 0.2 and ft1-coefficients of 0.24 vs. 0.4 \u2014 a large, systematic deviation, not a rounding-order difference the 1e-3 tolerance would absorb. This will fail the grading script's relative-Frobenius-error check on the 64 merged tensors.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "Task vector 2 is computed against the base after task vector 1 has already been added, so the second delta is taken from the wrong reference point.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

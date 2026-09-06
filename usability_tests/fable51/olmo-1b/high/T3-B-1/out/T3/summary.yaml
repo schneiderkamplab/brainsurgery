@@ -1,0 +1,46 @@
+transforms:
+- assert:
+    count:
+      of: model::.*
+      is: 114
+- assert:
+    count:
+      of: model::model\.layers\.\d+\.(self_attn\.[qkvo]_proj|mlp\.(gate|up|down)_proj)\.weight
+      is: 112
+- assert:
+    dtype:
+      of: model::.*
+      is: float32
+- cast_:
+    target: model::model\.layers\.\d+\.(self_attn\.[qkvo]_proj|mlp\.(gate|up|down)_proj)\.weight
+    to: bfloat16
+- assert:
+    all:
+    - count:
+        of: model::model\.layers\.\d+\.(self_attn\.[qkvo]_proj|mlp\.(gate|up|down)_proj)\.weight
+        is: 112
+    - dtype:
+        of: model::model\.layers\.\d+\.(self_attn\.[qkvo]_proj|mlp\.(gate|up|down)_proj)\.weight
+        is: bfloat16
+    - count:
+        of: model::(?!model\.layers\.\d+\.(self_attn\.[qkvo]_proj|mlp\.(gate|up|down)_proj)\.weight$).*
+        is: 2
+    - dtype:
+        of: model::(?!model\.layers\.\d+\.(self_attn\.[qkvo]_proj|mlp\.(gate|up|down)_proj)\.weight$).*
+        is: float32
+- assert:
+    dtype:
+      of: model::model\.layers\.0\.self_attn\.q_proj\.weight
+      is: bfloat16
+- assert:
+    dtype:
+      of: model::model\.embed_tokens\.weight
+      is: float32
+- assert:
+    dtype:
+      of: model::lm_head\.weight
+      is: float32
+- assert:
+    count:
+      of: model::.*
+      is: 114

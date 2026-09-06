@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/B/T1-defective.yaml",
+  "started_at": "2026-09-05T23:50:30+00:00",
+  "finished_at": "2026-09-05T23:50:49+00:00",
+  "wall_clock_s": 19.0,
+  "tokens_in": 2,
+  "tokens_out": 1333,
+  "cost_usd": 0.1230415,
+  "verdict_text": "NO\n\nThe plan deletes blocks 2, 6, 10, and **15** instead of 2, 6, 10, and **14**, violating Required result clause 1 (\"Remove every tensor of blocks 2, 6, 10, 14\"). Consequently its renumbering chain maps old 14 \u2192 new 11, whereas clause 2 requires old 15 \u2192 new 11 (and old 14 to be gone), so the seven tensors at `model.layers.11.*` in the output hold block 14's weights rather than block 15's \u2014 a bit-exact value mismatch that `grade.py` will catch. The header comment states the same wrong block set, so this is a consistent misreading rather than a typo in one line. Everything else is correct: the move ordering (lowest destination first) is collision-free, the non-block tensors are untouched, and the output path and shape/dtype preservation are fine. Notably all three required asserts still pass on this wrong output \u2014 the `not exists 12|13|14|15` check is satisfied because renumbering vacates those indices regardless of which block was dropped \u2014 so it fails silently in exactly the way the specification's rationale warns about.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The drop set is off by one: the last dropped block is the one after the specified block (for example blocks 2, 5, 9 instead of 2, 5, 8). Block counts still match, so the artifact's own checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

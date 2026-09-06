@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/B/T4-defective.yaml",
+  "started_at": "2026-09-05T23:48:56+00:00",
+  "finished_at": "2026-09-05T23:49:13+00:00",
+  "wall_clock_s": 16.5,
+  "tokens_in": 2,
+  "tokens_out": 1215,
+  "cost_usd": 0.1234485,
+  "verdict_text": "NO\n\nThe second task vector is taken against an already-modified base: the first `add_` writes `base + 0.4*(ft1 - base)` into `base::h.<i>.mlp.*`, and the subsequent `subtract_` for `tv2` subtracts that updated tensor, so `tv2 = ft2 - (base + 0.4*(ft1-base))` rather than `ft2 - base`. The output is therefore `base + 0.4*(ft1-base) + 0.4*(ft2-base) - 0.16*(ft1-base)`, violating the formula in \"Required result\" step 2 and the explicit ordering requirement that each task vector be taken against the unmodified base. The correct fix is to compute both `tv1` and `tv2` (copy, subtract, scale) before either `add_` back into `base`. Additionally, the plan never asserts that exactly 48 tensors were merged, so it omits one of the three mandatory \"Required checks\" (it only asserts 160-tensor counts for `ft1`, `ft2`, and the output). The shared-tensor verification and the 160-tensor output check are otherwise present and correctly placed.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "Task vector 2 is computed against the base after task vector 1 has already been added, so the second delta is taken from the wrong reference point.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

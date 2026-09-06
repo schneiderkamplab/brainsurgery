@@ -1,0 +1,33 @@
+# T3: mixed-precision export with sharding for GPT-2 (124M)
+inputs:
+  - model::inputs/base/model.safetensors
+
+transforms:
+  # Sanity on the input: 160 tensors, 48 projection matrices, 12 mask buffers.
+  - assert: { count: { of: '.*', is: 160 } }
+  - assert: { count: { of: 'h\.\d+\.(attn\.c_attn|attn\.c_proj|mlp\.c_fc|mlp\.c_proj)\.weight', is: 48 } }
+  - assert: { count: { of: 'h\.\d+\.attn\.bias', is: 12 } }
+
+  # Drop the causal-mask buffers (non-parameters).
+  - delete: { target: 'h\.\d+\.attn\.bias' }
+
+  # Cast exactly the four projection matrices per layer to bfloat16.
+  - cast_: { target: 'h\.\d+\.(attn\.c_attn|attn\.c_proj|mlp\.c_fc|mlp\.c_proj)\.weight', to: bfloat16 }
+
+  # Required checks (fail loudly before writing).
+  - assert:
+      all:
+        # exactly 48 tensors are bfloat16: the 48 projections are bfloat16 ...
+        - count: { of: 'h\.\d+\.(attn\.c_attn|attn\.c_proj|mlp\.c_fc|mlp\.c_proj)\.weight', is: 48 }
+        - dtype: { of: 'h\.\d+\.(attn\.c_attn|attn\.c_proj|mlp\.c_fc|mlp\.c_proj)\.weight', is: bfloat16 }
+        # ... and every other tensor is float32
+        - dtype: { of: '(?!h\.\d+\.(attn\.c_attn|attn\.c_proj|mlp\.c_fc|mlp\.c_proj)\.weight$).*', is: float32 }
+        - dtype: { of: 'h\.0\.attn\.c_attn\.weight', is: bfloat16 }
+        - dtype: { of: 'wte\.weight', is: float32 }
+        - not: { exists: 'h\.\d+\.attn\.bias' }
+        - count: { of: '.*', is: 148 }
+
+output:
+  path: out/T3
+  format: safetensors
+  shard: 64MB

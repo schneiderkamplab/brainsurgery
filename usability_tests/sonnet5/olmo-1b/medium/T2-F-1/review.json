@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/P/T2-defective.py",
+  "started_at": "2026-09-05T21:43:49+00:00",
+  "finished_at": "2026-09-05T21:43:53+00:00",
+  "wall_clock_s": 4.5,
+  "tokens_in": 2,
+  "tokens_out": 221,
+  "cost_usd": 0.0405888,
+  "verdict_text": "NO\n\nThe specification requires removing head 5 (rows/columns 640..767), but the artifact removes head 6 (rows/columns 768..895), as stated in its own docstring (\"remove attention head 6\") and `DROP_HEAD = 6`. This violates the \"Required result\" clause which explicitly specifies keeping rows/columns `0..639, 768..2047` (i.e., dropping head 5), not `0..767, 896..2047`. The shape assertions still pass (both produce `[1920, 2048]`/`[2048, 1920]`), so the required checks don't catch the error, but the actual retained values are wrong and will not match the hidden reference bit-exactly.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The removed head is off by one (head N+1 instead of head N). All shapes are still correct, so the artifact's own shape checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

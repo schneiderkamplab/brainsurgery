@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/pythia-1b/P/T1-defective.py",
+  "started_at": "2026-09-05T21:20:23+00:00",
+  "finished_at": "2026-09-05T21:20:28+00:00",
+  "wall_clock_s": 4.9,
+  "tokens_in": 2,
+  "tokens_out": 180,
+  "cost_usd": 0.039749799999999995,
+  "verdict_text": "NO\n\nThe script drops blocks {2, 6, 10, **15**} instead of the specified {2, 6, 10, **14**}, and its renumbering map (derived generically from `kept`) therefore differs from the required mapping \u2014 e.g. old 14 should map to new 11 and old 15 should be removed, but this script keeps old 14\u2192new 11 incorrectly (actually keeps 14, drops 15), violating clause 1 (\"Remove every tensor of blocks 2, 6, 10, 14\") and clause 2's explicit renumbering table.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The drop set is off by one: the last dropped block is the one after the specified block (for example blocks 2, 5, 9 instead of 2, 5, 8). Block counts still match, so the artifact's own checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

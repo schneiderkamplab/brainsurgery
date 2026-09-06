@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/pythia-1b/P/T1-defective.py",
+  "started_at": "2026-09-06T00:04:53+00:00",
+  "finished_at": "2026-09-06T00:05:03+00:00",
+  "wall_clock_s": 10.2,
+  "tokens_in": 2,
+  "tokens_out": 613,
+  "cost_usd": 0.1072515,
+  "verdict_text": "NO\n\nThe artifact drops blocks 2, 6, 10, **15** instead of 2, 6, 10, **14**, violating Required result clause 1 (\"Remove every tensor of blocks 2, 6, 10, 14\"). Consequently the renumbering also violates clause 2: old 14 is mapped to new 11 while old 15 is deleted, whereas the spec requires old 15 \u2192 11 and old 14 deleted, so the last block's 15 tensors have the wrong values under the name `gpt_neox.layers.11.*` and grading's bit-exact value comparison fails. The required checks do not catch this: the `layers == set(range(12))` and `len(out) == 184` assertions both pass for the wrong drop set, so the script writes a silently incorrect checkpoint \u2014 exactly the failure mode the task description warns about. Separately, the assertions are bare `assert` statements, which are removed under `python -O`, so the mandated checks are not unconditionally enforced.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The drop set is off by one: the last dropped block is the one after the specified block (for example blocks 2, 5, 9 instead of 2, 5, 8). Block counts still match, so the artifact's own checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

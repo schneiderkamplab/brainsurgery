@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/B/T1-defective.yaml",
+  "started_at": "2026-09-05T21:07:41+00:00",
+  "finished_at": "2026-09-05T21:07:49+00:00",
+  "wall_clock_s": 7.2,
+  "tokens_in": 2,
+  "tokens_out": 389,
+  "cost_usd": 0.0403658,
+  "verdict_text": "NO\n\nThe plan removes blocks 2, 5, and 9 instead of blocks 2, 5, and 8, violating Required result clause 1 (\"Remove every tensor of blocks 2, 5, 8\"). Consequently the renumbering also diverges from the spec's required mapping (old 8 must become new 6, but the artifact instead moves old 8\u21926 while leaving old 9 deleted and old 6\u21924, old 7\u21925, old 10\u21927, old 11\u21928, which does not match \"old 6 becomes 4, old 7 becomes 5, old 9 becomes 6, old 10 becomes 7, old 11 becomes 8\" since block 9 is missing rather than block 8). The assert checks are internally consistent with the (wrong) choice of dropping 9 instead of 8, and check for absence of blocks 9/10/11 instead of the required check for absence of blocks 9, 10, 11 post-renumbering combined with correct-source retention \u2014 but since block 9 was deleted instead of 8, the surviving block set and final tensor values will not match the hidden reference, failing \"Grading\" (exact key set / bit-exact values) even though tensor count (121) is coincidentally correct.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The drop set is off by one: the last dropped block is the one after the specified block (for example blocks 2, 5, 9 instead of 2, 5, 8). Block counts still match, so the artifact's own checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

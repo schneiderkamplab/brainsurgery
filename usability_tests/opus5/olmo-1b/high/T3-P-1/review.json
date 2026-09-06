@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/P/T3-defective.py",
+  "started_at": "2026-09-05T23:53:35+00:00",
+  "finished_at": "2026-09-05T23:53:44+00:00",
+  "wall_clock_s": 9.4,
+  "tokens_in": 2,
+  "tokens_out": 547,
+  "cost_usd": 0.10132550000000001,
+  "verdict_text": "NO\n\nThe alternation in `matrix_re` omits `self_attn.o_proj.weight`, so only 6 of the 7 listed projection matrices per layer are cast \u2014 96 tensors instead of 112 \u2014 and all 16 `model.layers.<i>.self_attn.o_proj.weight` tensors are left in float32, violating Required result clause 1 (and clause 2, since o_proj is not \"every other tensor\"). The guard `assert sum(...) == 96` encodes the same off-by-one and therefore does not fail loudly, violating the first Required check (\"exactly 112 tensors are bfloat16\"). Since grading compares dtypes against a hidden reference, the 16 o_proj tensors will mismatch. The remaining behaviour is fine: `buffer_re` with the never-matching `(?!)` deletes nothing (correct per clause 3, though it is dead code), names are unchanged, and the 114-tensor count and sharded output with index are as required.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "One projection family is missing from the bfloat16 cast pattern (the attention output projection stays float32); the artifact's own count check was adjusted to the wrong number.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

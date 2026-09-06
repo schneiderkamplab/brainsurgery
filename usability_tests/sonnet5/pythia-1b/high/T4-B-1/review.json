@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/pythia-1b/B/T4-defective.yaml",
+  "started_at": "2026-09-05T22:38:35+00:00",
+  "finished_at": "2026-09-05T22:39:13+00:00",
+  "wall_clock_s": 37.8,
+  "tokens_in": 2,
+  "tokens_out": 3410,
+  "cost_usd": 0.0777378,
+  "verdict_text": "NO\n\nThe plan's `add_` step for task-vector 1 mutates the MLP tensors under `base::...` in place (`base_mlp = base_mlp + tv1`) before task-vector 2 is computed. When it then computes `tv2`, the `subtract_` step uses `from: 'base::...'` referring to that same tensor path \u2014 which by then already holds `base + 0.4*(ft1-base)`, not the original base. So `tv2` is computed as `ft2 - (already-updated base)` instead of `ft2 - base`, and the final merge mathematically works out to `0.36*base + 0.24*ft1 + 0.4*ft2` rather than the required `0.2*base + 0.4*ft1 + 0.4*ft2`. This directly violates Required Result step 2's formula and is precisely the \"arithmetic hazard\" the spec calls out: each task vector must be taken against the unmodified base, not one already changed by the first merge. Additionally, the plan has no explicit assert verifying \"exactly 64 tensors were merged\" as demanded by the Required Checks section (it only asserts the final total tensor count is 244).",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "Task vector 2 is computed against the base after task vector 1 has already been added, so the second delta is taken from the wrong reference point.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

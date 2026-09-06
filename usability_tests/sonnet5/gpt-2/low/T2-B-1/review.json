@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/B/T2-defective.yaml",
+  "started_at": "2026-09-05T21:09:30+00:00",
+  "finished_at": "2026-09-05T21:09:35+00:00",
+  "wall_clock_s": 5.2,
+  "tokens_in": 2,
+  "tokens_out": 207,
+  "cost_usd": 0.0656438,
+  "verdict_text": "NO\n\nThe specification requires removing head 5 (columns/rows 320..383, i.e. offsets 320:384), but the artifact slices around head index 6's boundary (384:448) instead, keeping columns/rows 0:384 and 448:768 rather than the required 0:320 and 384:768. This produces c_attn tensors that retain head 5 and drop head 6, and c_proj.weight rows 0:384/448:768 instead of 0:320/384:768 \u2014 violating \"Required result\" clauses 1\u20133 (wrong slice boundaries) even though the final shapes (2112, 2112, 704\u00d7768) coincidentally match.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The removed head is off by one (head N+1 instead of head N). All shapes are still correct, so the artifact's own shape checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

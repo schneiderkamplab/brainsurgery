@@ -1,0 +1,83 @@
+inputs:
+  - base::inputs/base/model.safetensors
+  - lora::inputs/lora/adapter_model.safetensors
+
+transforms:
+  # Preflight: confirm the adapter shape and the exact pair count we expect
+  # for a single-module (attn.c_attn), 12-layer LoRA adapter (r=16).
+  - assert:
+      count:
+        of: 'lora::base_model\.model\.h\.(\d+)\.attn\.c_attn\.lora_A\.weight'
+        is: 12
+  - assert:
+      count:
+        of: 'lora::base_model\.model\.h\.(\d+)\.attn\.c_attn\.lora_B\.weight'
+        is: 12
+  - assert:
+      shape:
+        of: lora::base_model.model.h.0.attn.c_attn.lora_A.weight
+        is: [16, 768]
+  - assert:
+      shape:
+        of: lora::base_model.model.h.0.attn.c_attn.lora_B.weight
+        is: [2304, 16]
+  - assert:
+      shape:
+        of: base::h.0.attn.c_attn.weight
+        is: [768, 2304]
+
+  # delta_ba = B @ A, shape [2304, 768] (nn.Linear-style low-rank product).
+  - matmul:
+      from_a: 'lora::base_model\.model\.h\.(\d+)\.attn\.c_attn\.lora_B\.weight'
+      from_b: 'lora::base_model.model.h.\1.attn.c_attn.lora_A.weight'
+      to: 'base::h.\1.attn.c_attn.lora_ba'
+
+  # fan_in_fan_out=true: the base Conv1D weight is [in, out], so transpose
+  # the Linear-convention product before adding it in.
+  - permute:
+      from: 'base::h\.(\d+)\.attn\.c_attn\.lora_ba'
+      to: 'base::h.\1.attn.c_attn.lora_ba_t'
+      order: [1, 0]
+
+  # scale = lora_alpha / r = 32 / 16 = 2.
+  - scale:
+      from: 'base::h\.(\d+)\.attn\.c_attn\.lora_ba_t'
+      to: 'base::h.\1.attn.c_attn.lora_delta'
+      by: 2.0
+
+  # h.<i>.attn.c_attn.weight += scale * (B @ A).T, in place, keeping name/shape/dtype.
+  - add_:
+      from: 'base::h\.(\d+)\.attn\.c_attn\.lora_delta'
+      to: 'base::h.\1.attn.c_attn.weight'
+
+  # Drop every intermediate tensor created above; the adapter alias itself is
+  # never written to, so it is not part of the inferred output.
+  - delete: { target: 'base::h\.(\d+)\.attn\.c_attn\.lora_ba' }
+  - delete: { target: 'base::h\.(\d+)\.attn\.c_attn\.lora_ba_t' }
+  - delete: { target: 'base::h\.(\d+)\.attn\.c_attn\.lora_delta' }
+
+  # Required checks.
+  - assert:
+      count:
+        of: 'lora::base_model\.model\.h\.(\d+)\.attn\.c_attn\.lora_A\.weight'
+        is: 12
+  - assert:
+      not:
+        exists: 'base::.*lora_.*'
+  - assert:
+      shape:
+        of: base::h.0.attn.c_attn.weight
+        is: [768, 2304]
+  - assert:
+      count:
+        of: 'base::.*'
+        is: 160
+  - assert:
+      dtype:
+        of: base::h.0.attn.c_attn.weight
+        is: float32
+
+output:
+  path: out/T5
+  format: safetensors
+  shard: 100MB

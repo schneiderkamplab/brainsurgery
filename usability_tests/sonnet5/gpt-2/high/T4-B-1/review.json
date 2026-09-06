@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/B/T4-defective.yaml",
+  "started_at": "2026-09-05T22:13:05+00:00",
+  "finished_at": "2026-09-05T22:13:24+00:00",
+  "wall_clock_s": 18.5,
+  "tokens_in": 2,
+  "tokens_out": 1758,
+  "cost_usd": 0.05662880000000001,
+  "verdict_text": "NO\n\nThe plan violates Required result step 2 and the ordering hazard called out in \"Why it is meaningful\": task vector 1 is computed and added to `base::...` in place *before* task vector 2 is computed, so the `subtract_` for tv2 subtracts the already-updated base (base + 0.4\u00b7(ft1\u2212base)) from ft2 instead of the original, unmodified base. Tracing the arithmetic gives `out = 0.36\u00b7base + 0.24\u00b7ft1 + 0.4\u00b7ft2` instead of the required `out = 0.2\u00b7base + 0.4\u00b7ft1 + 0.4\u00b7ft2`, a large discrepancy that would fail the grading tolerance (relative Frobenius error \u2264 1e-5) on all 48 merged tensors. This is exactly the sequencing bug the spec warns against: \"each task vector must be taken against the unmodified base, not against a base that the first merge already changed.\"",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "Task vector 2 is computed against the base after task vector 1 has already been added, so the second delta is taken from the wrong reference point.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

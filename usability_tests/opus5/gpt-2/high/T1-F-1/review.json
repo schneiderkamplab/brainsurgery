@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/P/T1-defective.py",
+  "started_at": "2026-09-05T23:38:31+00:00",
+  "finished_at": "2026-09-05T23:38:42+00:00",
+  "wall_clock_s": 11.4,
+  "tokens_in": 2,
+  "tokens_out": 693,
+  "cost_usd": 0.10363549999999999,
+  "verdict_text": "NO\n\nThe artifact drops blocks {2, 5, 9} instead of the specified {2, 5, 8}, violating \"Required result\" clause 1 (\"Remove every tensor of blocks 2, 5, 8\"). As a consequence the renumbering is also wrong: it maps old 8\u21926, old 10\u21927, old 11\u21928, whereas clause 2 mandates old 9\u21926, old 10\u21927, old 11\u21928 (and old 8 must not survive at all). Everything else \u2014 the pattern-based whole-block matching, contiguity check, the 121-tensor assertion, and writing `out/T1/model.safetensors` only after the checks pass \u2014 conforms, and the tensor count still comes out to 121, so the error is silent by count and only caught by the hidden reference's bit-exact key/value comparison. The `assert` statements would also be stripped under `python -O`, which weakens the \"fail loudly\" requirement, but that is secondary to the wrong block set.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The drop set is off by one: the last dropped block is the one after the specified block (for example blocks 2, 5, 9 instead of 2, 5, 8). Block counts still match, so the artifact's own checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

@@ -1,0 +1,12 @@
+{
+  "task": "T2",
+  "passed": true,
+  "findings": [],
+  "metrics": {
+    "target": "pythia-1b",
+    "tensors_expected": 244,
+    "tensors_found": 244,
+    "shape_dtype_mismatches": 0,
+    "value_mismatches": 0
+  }
+}

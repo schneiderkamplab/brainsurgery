@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/pythia-1b/B/T3-defective.yaml",
+  "started_at": "2026-09-06T00:12:49+00:00",
+  "finished_at": "2026-09-06T00:13:02+00:00",
+  "wall_clock_s": 13.5,
+  "tokens_in": 2,
+  "tokens_out": 899,
+  "cost_usd": 0.1149945,
+  "verdict_text": "NO\n\nThe plan casts only three of the four projection families to bfloat16 \u2014 `gpt_neox.layers.<i>.attention.dense.weight` is absent from the `cast_` target regex \u2014 so 48 tensors are bfloat16 instead of 64 and the 16 `attention.dense.weight` matrices stay float32, violating Required result clause 1 (and the bit-exact dtype comparison in Grading). The required check \"exactly 64 tensors are bfloat16\" is not implemented; it is replaced by `assert count ... is: 48` over the same three-family pattern, which is self-consistent with the bug and therefore cannot catch it, violating the Required checks clause. The remaining checks (`query_key_value.weight` is bfloat16, `embed_in.weight` is float32, 196 tensors total) all still pass under the defect, so the run writes a silently wrong checkpoint. Separately, `shard: 256MB` should be verified to mean 268,435,456 bytes rather than 256,000,000; if the tool reads `MB` as 10^6, the shard grouping will not match the reference layout required by clause 5. Deletion of the 48 buffers, the float32 upcast of everything else, and name preservation (clauses 2\u20134) are correct.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "One projection family is missing from the bfloat16 cast pattern (the attention output projection stays float32); the artifact's own count check was adjusted to the wrong number.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

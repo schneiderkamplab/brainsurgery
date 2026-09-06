@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/B/T4-defective.yaml",
+  "started_at": "2026-09-06T00:37:36+00:00",
+  "finished_at": "2026-09-06T00:37:45+00:00",
+  "wall_clock_s": 9.1,
+  "tokens_in": 2,
+  "tokens_out": 549,
+  "cost_usd": 0.208039,
+  "verdict_text": "NO\n\nThe second task vector is computed against a base that has already been modified. After the first `add_` step, the base MLP tensors hold `base + 0.4*(ft1 - base)`, so the subsequent `subtract_` for `tv2` yields `ft2 - base - 0.4*(ft1 - base)` instead of `ft2 - base`. The result is `base + 0.4*(ft1-base) + 0.4*(ft2-base) - 0.16*(ft1-base)`, which violates the formula in \"Required result\" step 2 and is exactly the ordering hazard the specification warns about. Separately, the plan never asserts that exactly 48 tensors were merged, as \"Required checks\" demands; it only asserts input and output counts of 114.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "Task vector 2 is computed against the base after task vector 1 has already been added, so the second delta is taken from the wrong reference point.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

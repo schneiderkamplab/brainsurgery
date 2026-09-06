@@ -1,0 +1,39 @@
+# T1: depth pruning Pythia-1B 16 -> 12 layers, removing blocks 2, 6, 10, 14.
+inputs:
+  - model::inputs/base/model.safetensors
+
+transforms:
+  # Sanity on the input before touching anything.
+  - assert: { count: { of: '.*', is: 244 } }
+  - assert: { count: { of: 'gpt_neox\.layers\.\d+\.attention\.query_key_value\.weight', is: 16 } }
+
+  # 1. Remove every tensor of blocks 2, 6, 10, 14 (the \. after the index keeps 1 from matching 10..15).
+  - delete: { target: 'gpt_neox\.layers\.(2|6|10|14)\..*' }
+  - assert: { not: { exists: 'gpt_neox\.layers\.(2|6|10|14)\..*' } }
+  - assert: { count: { of: '.*', is: 184 } }
+
+  # 2. Renumber survivors in ascending order: every destination index is lower
+  #    than its source and already vacated, so no move can collide.
+  - move: { from: 'gpt_neox\.layers\.3\.(.*)',  to: 'gpt_neox.layers.2.\1' }
+  - move: { from: 'gpt_neox\.layers\.4\.(.*)',  to: 'gpt_neox.layers.3.\1' }
+  - move: { from: 'gpt_neox\.layers\.5\.(.*)',  to: 'gpt_neox.layers.4.\1' }
+  - move: { from: 'gpt_neox\.layers\.7\.(.*)',  to: 'gpt_neox.layers.5.\1' }
+  - move: { from: 'gpt_neox\.layers\.8\.(.*)',  to: 'gpt_neox.layers.6.\1' }
+  - move: { from: 'gpt_neox\.layers\.9\.(.*)',  to: 'gpt_neox.layers.7.\1' }
+  - move: { from: 'gpt_neox\.layers\.11\.(.*)', to: 'gpt_neox.layers.8.\1' }
+  - move: { from: 'gpt_neox\.layers\.12\.(.*)', to: 'gpt_neox.layers.9.\1' }
+  - move: { from: 'gpt_neox\.layers\.13\.(.*)', to: 'gpt_neox.layers.10.\1' }
+  - move: { from: 'gpt_neox\.layers\.15\.(.*)', to: 'gpt_neox.layers.11.\1' }
+
+  # Required checks.
+  - assert: { not: { exists: 'gpt_neox\.layers\.(12|13|14|15)\..*' } }
+  - assert: { count: { of: 'gpt_neox\.layers\.\d+\.attention\.query_key_value\.weight', is: 12 } }
+  - assert: { count: { of: 'gpt_neox\.layers\.(\d|1[01])\..*', is: 180 } }
+  - assert: { count: { of: '.*', is: 184 } }
+  # Non-block tensors still present.
+  - assert: { all: [ { exists: 'gpt_neox\.embed_in\.weight' }, { exists: 'embed_out\.weight' },
+                     { exists: 'gpt_neox\.final_layer_norm\.weight' }, { exists: 'gpt_neox\.final_layer_norm\.bias' } ] }
+
+output:
+  path: out/T1/model.safetensors
+  format: safetensors

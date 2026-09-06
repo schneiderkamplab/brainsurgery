@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/B/T4-defective.yaml",
+  "started_at": "2026-09-06T01:38:52+00:00",
+  "finished_at": "2026-09-06T01:39:19+00:00",
+  "wall_clock_s": 26.9,
+  "tokens_in": 2,
+  "tokens_out": 1788,
+  "cost_usd": 0.26970900000000003,
+  "verdict_text": "NO\n\nThe task-vector for ft2 is taken against an already-modified base: the plan adds the scaled ft1 vector into `base::model.layers.N.*` before it copies ft2 and subtracts `base` to form `tv2`, so `tv2 = ft2 - (base + 0.4*(ft1 - base))` rather than `ft2 - base`. The output is therefore `base + 0.24*(ft1-base) + 0.4*(ft2-base)`, violating Required result step 2 (and the ordering hazard the spec calls out explicitly); the relative Frobenius error will exceed 1e-5. Separately, the plan never asserts that exactly 48 tensors were merged (no count on the MLP pattern or on the tv1/tv2 tensors), which the Required checks section demands. The base's own tensor count is only asserted at the end rather than as part of the step-1 verification, though the equal-asserts do cover name and value agreement for the non-MLP tensors.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "Task vector 2 is computed against the base after task vector 1 has already been added, so the second delta is taken from the wrong reference point.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

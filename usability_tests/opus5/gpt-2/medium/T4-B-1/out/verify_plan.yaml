@@ -1,0 +1,19 @@
+# Independent check of out/T4/model.safetensors, using the literal
+# base + l*(ft1-base) + l*(ft2-base) order instead of the collected form.
+inputs:
+  - out::out/T4/model.safetensors
+  - base::inputs/base/model.safetensors
+  - ft1::inputs/ft1/model.safetensors
+  - ft2::inputs/ft2/model.safetensors
+transforms:
+  - assert: { count: { of: 'out::.+', is: 160 } }
+  # non-MLP tensors bit-identical to the base
+  - assert: { equal: { left: 'out::(?!h\.\d+\.mlp\.).+', right: 'base::\g<0>' } }
+  # task vectors, taken against the untouched base
+  - subtract_: { from: 'base::(h\.\d+\.mlp\..+)', to: 'ft1::\1' }
+  - subtract_: { from: 'base::(h\.\d+\.mlp\..+)', to: 'ft2::\1' }
+  - scale_: { target: 'ft1::h\.\d+\.mlp\..+', by: 0.4 }
+  - scale_: { target: 'ft2::h\.\d+\.mlp\..+', by: 0.4 }
+  - add_: { from: 'ft1::(h\.\d+\.mlp\..+)', to: 'base::\1' }
+  - add_: { from: 'ft2::(h\.\d+\.mlp\..+)', to: 'base::\1' }
+  - assert: { equal: { left: 'out::(.+)', right: 'base::\1', eps: 1e-6 } }

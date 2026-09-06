@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/B/T5-defective.yaml",
+  "started_at": "2026-09-05T23:26:04+00:00",
+  "finished_at": "2026-09-05T23:26:13+00:00",
+  "wall_clock_s": 9.2,
+  "tokens_in": 2,
+  "tokens_out": 516,
+  "cost_usd": 0.10530049999999999,
+  "verdict_text": "NO\n\nThe merge omits the LoRA scaling factor: the plan computes `delta = B @ A` and adds it directly, never multiplying by `scale = lora_alpha / r = 2` (the plan even comments \"defect: the alpha / r scale is missing\"). This violates Required result clause 1, which mandates `weight += scale * B @ A`; every one of the 32 merged weights is off by a factor of 2 on the delta term, far exceeding the 1e-5 relative Frobenius tolerance in Grading. The four required checks are all present and would pass, so the run would succeed silently and produce a wrong checkpoint. Secondarily, `shard: 512MB` expresses the limit in decimal megabytes (512,000,000) rather than the specified 512 MiB (536,870,912), which is stricter than required and may not reproduce the reference's shard boundaries.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The adapter scaling factor alpha / r is missing: the raw low-rank product is added.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

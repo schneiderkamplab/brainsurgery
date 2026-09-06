@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/pythia-1b/B/T4-defective.yaml",
+  "started_at": "2026-09-05T21:59:42+00:00",
+  "finished_at": "2026-09-05T21:59:53+00:00",
+  "wall_clock_s": 11.5,
+  "tokens_in": 2,
+  "tokens_out": 869,
+  "cost_usd": 0.0523158,
+  "verdict_text": "NO\n\nThe plan computes tv1 = ft1 \u2212 base and immediately adds it in-place into `base::...`, so by the time it computes tv2 it does `subtract_: { from: 'base::...', to: 'base::...tv2' }` against the *already-merged* base tensor (base + 0.4\u00b7(ft1\u2212base)), not the original base. This means `out[X] = base + 0.4*(ft1-base) + 0.4*(ft2 - (base+0.4*(ft1-base)))`, which is not the required `base + \u03bb*(ft1-base) + \u03bb*(ft2-base)` \u2014 exactly the ordering hazard the spec warns about in \"Why it is meaningful\" and required by step 2's formula. Additionally, the plan never asserts that exactly 64 tensors were merged (only that base has 244 tensors afterward), so the \"exactly 64 tensors were merged\" required check from \"Required checks\" is not enforced.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "Task vector 2 is computed against the base after task vector 1 has already been added, so the second delta is taken from the wrong reference point.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

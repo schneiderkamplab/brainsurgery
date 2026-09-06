@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "deny": [
+      "WebFetch",
+      "WebSearch",
+      "Read(../**)",
+      "Read(//**/references/**)",
+      "Read(//**/solutions/**)",
+      "Read(//**/review/**)",
+      "Bash(pip install*)",
+      "Bash(pip3 install*)",
+      "Bash(uv pip install*)",
+      "Bash(uv add*)",
+      "Bash(conda install*)",
+      "Bash(git *)"
+    ]
+  }
+}

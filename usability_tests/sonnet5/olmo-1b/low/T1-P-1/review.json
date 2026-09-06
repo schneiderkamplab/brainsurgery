@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/P/T1-defective.py",
+  "started_at": "2026-09-05T21:11:43+00:00",
+  "finished_at": "2026-09-05T21:11:47+00:00",
+  "wall_clock_s": 4.7,
+  "tokens_in": 2,
+  "tokens_out": 210,
+  "cost_usd": 0.0378788,
+  "verdict_text": "NO\n\nThe script drops blocks {2, 6, 10, **15**} instead of the required {2, 6, 10, **14**}, and its renumbering mapping (kept = [0,1,3,4,5,7,8,9,11,12,13,14]) does not match spec clause 2, which requires old 14 to be dropped and old 15\u219211. This produces a different set of surviving blocks and a wrong renumbering (e.g., old 14 would map to new 11 instead of being removed, and old 15 is wrongly removed instead of becoming new 11), so the output tensors/values will not match the hidden reference despite passing the internal count/shape checks.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The drop set is off by one: the last dropped block is the one after the specified block (for example blocks 2, 5, 9 instead of 2, 5, 8). Block counts still match, so the artifact's own checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

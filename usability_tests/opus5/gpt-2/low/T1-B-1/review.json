@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/B/T1-defective.yaml",
+  "started_at": "2026-09-05T22:46:42+00:00",
+  "finished_at": "2026-09-05T22:46:54+00:00",
+  "wall_clock_s": 11.8,
+  "tokens_in": 2,
+  "tokens_out": 664,
+  "cost_usd": 0.10392050000000001,
+  "verdict_text": "NO\n\nThe plan prunes the wrong blocks: the specification's clause 1 requires removing every tensor of blocks 2, 5, **8**, but the plan deletes blocks 2, 5, **9** (`delete: h\\.(2|5|9)\\..*`). Consequently the renumbering in clause 2 is also wrong: it maps old 6\u21924, 7\u21925, 8\u21926, 10\u21927, 11\u21928, whereas the spec requires 6\u21924, 7\u21925, 9\u21926, 10\u21927, 11\u21928. The output therefore contains old block 8 where the reference has old block 9, so the graded bit-exact value comparison fails for those 13 tensors (and for the shifted names around them). The required checks still pass, since 121 tensors, 9 blocks, and no `h.9/10/11` all hold for this incorrect selection \u2014 they cannot catch the wrong choice of deleted block.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The drop set is off by one: the last dropped block is the one after the specified block (for example blocks 2, 5, 9 instead of 2, 5, 8). Block counts still match, so the artifact's own checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

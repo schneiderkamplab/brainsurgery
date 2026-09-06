@@ -1,0 +1,41 @@
+inputs:
+  - model::inputs/base
+
+output:
+  path: out/T1/model.safetensors
+  format: safetensors
+
+transforms:
+  # --- Preflight: confirm the expected 16-layer, 114-tensor input shape ---
+  - assert: { count: { of: 'model\.layers\.\d+\.self_attn\.q_proj\.weight', is: 16 } }
+  - assert: { count: { of: '.*', is: 114 } }
+  - assert: { exists: model.embed_tokens.weight }
+  - assert: { exists: lm_head.weight }
+
+  # --- Step 1: drop every tensor of the 4 blocks being pruned ---
+  - delete: { target: 'model\.layers\.(2|6|10|14)\..*' }
+
+  # --- Step 2: renumber survivors, in ascending old-index order so each
+  # target name is already vacated (by deletion or an earlier move in this
+  # same list) before it is written to. ---
+  - move: { from: 'model\.layers\.3\.(.*)', to: 'model.layers.2.\1' }
+  - move: { from: 'model\.layers\.4\.(.*)', to: 'model.layers.3.\1' }
+  - move: { from: 'model\.layers\.5\.(.*)', to: 'model.layers.4.\1' }
+  - move: { from: 'model\.layers\.7\.(.*)', to: 'model.layers.5.\1' }
+  - move: { from: 'model\.layers\.8\.(.*)', to: 'model.layers.6.\1' }
+  - move: { from: 'model\.layers\.9\.(.*)', to: 'model.layers.7.\1' }
+  - move: { from: 'model\.layers\.11\.(.*)', to: 'model.layers.8.\1' }
+  - move: { from: 'model\.layers\.12\.(.*)', to: 'model.layers.9.\1' }
+  - move: { from: 'model\.layers\.13\.(.*)', to: 'model.layers.10.\1' }
+  - move: { from: 'model\.layers\.15\.(.*)', to: 'model.layers.11.\1' }
+
+  # --- Required checks: fail loudly if the result is wrong ---
+  - assert: { not: { exists: 'model\.layers\.(12|13|14|15)\..*' } }
+  - assert: { count: { of: 'model\.layers\.\d+\.self_attn\.q_proj\.weight', is: 12 } }
+  - assert: { count: { of: '.*', is: 86 } }
+
+  # --- Extra sanity: every block still owns exactly its 7 tensors, and the
+  # two non-block tensors are untouched. ---
+  - assert: { count: { of: 'model\.layers\.\d+\..*', is: 84 } }
+  - assert: { shape: { of: model.embed_tokens.weight, is: [50304, 2048] } }
+  - assert: { shape: { of: lm_head.weight, is: [50304, 2048] } }

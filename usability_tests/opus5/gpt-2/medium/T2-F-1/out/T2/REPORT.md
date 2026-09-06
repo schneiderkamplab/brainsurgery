@@ -1,0 +1,21 @@
+# T2 self-report (condition F)
+
+- **Final artifact path:** `out/T2/solution.py` (runner: `out/T2/run.sh`); output `out/T2/model.safetensors`.
+- **Number of times you executed the script or plan:** 1 (one output-producing execution; the other Python invocations were read-only inspection and post-hoc verification).
+- **Which executions failed, and why:** none.
+- **Pitfalls or surprises you hit:**
+  - The route `F-allowed.md` suggests for this task — `transformers` `prune_heads` — does not exist in transformers 5.12.1: `PreTrainedModel.prune_heads`, `GPT2Model._prune_heads` and `GPT2Attention.prune_heads` were all removed in v5. I fell back to a plain slicing script.
+  - Conv1D `[in, out]` layout: heads are *columns* of `c_attn.weight` but *rows* of `attn.c_proj.weight`; the two need different axes.
+  - `c_attn` is fused, so the keep-index set must be tiled across three 768-wide q|k|v segments, not applied once.
+  - `c_proj` is an ambiguous name: `mlp.c_proj.weight` is also `[768, 768]`-ish and must not be touched. I matched on the structured path (`h.<i>.attn.<leaf>`) rather than a substring/regex.
+  - `attn.bias` (the `[1,1,1024,1024]` causal mask) and `attn.c_proj.bias` are per-model, not per-head, and stay untouched.
+  - The pruned checkpoint is not loadable by HF GPT-2 with `n_head=11`: `GPT2Attention` requires `embed_dim % num_heads == 0` and 768 % 11 != 0, and v5 no longer carries the `pruned_heads` / `split_size` machinery that used to decouple them. That is a transformers-side modelling limitation, not a property of the checkpoint; the task's requirement is on the checkpoint contents, which I verified directly.
+- **Anything unclear in the task text or documentation:** "loadable as the same architecture with 11 heads per layer" is not achievable with stock transformers 5.12.1 for the reason above; I read the "Required result" and "Required checks" sections as authoritative and satisfied those exactly.
+- **Tools used (condition F):**
+  - `torch` 2.14.0 — `index_select` for the slicing, `torch.equal` for the untouched-tensor check.
+  - `safetensors` 0.5.3 — `load_file` / `save_file`.
+  - `transformers` 5.12.1 — only to attempt the suggested `prune_heads` route and to confirm it was removed.
+  - Why a plain script: the requirement is a deterministic, bit-exact index selection on 36 tensors with three different axis conventions. mergekit and torch-state-bridge operate on whole layers / key names, not on sub-tensor slices, so neither can express it; with `prune_heads` gone, direct slicing was the only route that also keeps the values bit-exact.
+- **Checks enforced by the run (before writing):** exactly 160 input tensors; exactly 36 tensors edited; `h.0.attn.c_attn.weight == [768, 2112]`, `h.0.attn.c_attn.bias == [2112]`, `h.0.attn.c_proj.weight == [704, 768]`; the same three shapes for all 12 layers; exactly 160 output tensors; every other tensor bit-identical in shape, dtype and value to the input. Each failure raises and aborts before `save_file`.
+- **Independent verification after writing:** recomputed the expected slices for layers 3, 7 and 11 from the source with explicit literal ranges (`0:320, 384:768, 768:1088, 1152:1536, 1536:1856, 1920:2304`) and compared with `torch.equal`; key set and dtypes match the input.
+- **Approximate time spent:** ~10 minutes.

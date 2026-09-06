@@ -1,0 +1,307 @@
+# T2: structured attention-head pruning for Pythia-1B.
+#
+# Remove head 5 of 8 from every layer. Layout facts this plan relies on:
+#   * query_key_value.weight [6144, 2048] and .bias [6144] are the GPT-NeoX
+#     *interleaved* fused projection: head h owns rows 768*h .. 768*h+767
+#     (its q, then k, then v). Head 5 therefore owns rows 3840 .. 4607.
+#   * attention.dense.weight [2048, 2048] consumes the heads on its input
+#     axis (columns), 256 columns per head. Head 5 owns columns 1280 .. 1535.
+#
+# Strategy: copy the two surviving pieces of every head-bearing tensor into
+# temporary slots, drop the originals, then concatenate the pieces back under
+# the original names in the original order.
+
+inputs:
+  - model::inputs/base/model.safetensors
+
+transforms:
+  # ---------------------------------------------------------------- preflight
+  - assert: { count: { of: '.*', is: 244 } }
+  - assert:
+      shape:
+        of: 'gpt_neox\.layers\.(\d+)\.attention\.query_key_value\.weight'
+        is: [6144, 2048]
+  - assert:
+      shape:
+        of: 'gpt_neox\.layers\.(\d+)\.attention\.query_key_value\.bias'
+        is: [6144]
+  - assert:
+      shape:
+        of: 'gpt_neox\.layers\.(\d+)\.attention\.dense\.weight'
+        is: [2048, 2048]
+  - assert: { count: { of: 'gpt_neox\.layers\.(\d+)\.attention\.query_key_value\.weight', is: 16 } }
+  - assert: { count: { of: 'gpt_neox\.layers\.(\d+)\.attention\.query_key_value\.bias', is: 16 } }
+  - assert: { count: { of: 'gpt_neox\.layers\.(\d+)\.attention\.dense\.weight', is: 16 } }
+
+  # ------------------------------------------- carve out the surviving pieces
+  # heads 0-4 of the fused projection (rows 0 .. 3839)
+  - copy:
+      from: 'gpt_neox\.layers\.(\d+)\.attention\.query_key_value\.weight::[:3840, :]'
+      to: 'tmp_qkvw_lo_\1'
+  # heads 6-7 of the fused projection (rows 4608 .. 6143)
+  - copy:
+      from: 'gpt_neox\.layers\.(\d+)\.attention\.query_key_value\.weight::[4608:, :]'
+      to: 'tmp_qkvw_hi_\1'
+  - copy:
+      from: 'gpt_neox\.layers\.(\d+)\.attention\.query_key_value\.bias::[:3840]'
+      to: 'tmp_qkvb_lo_\1'
+  - copy:
+      from: 'gpt_neox\.layers\.(\d+)\.attention\.query_key_value\.bias::[4608:]'
+      to: 'tmp_qkvb_hi_\1'
+  # output projection: columns of heads 0-4 and of heads 6-7
+  - copy:
+      from: 'gpt_neox\.layers\.(\d+)\.attention\.dense\.weight::[:, :1280]'
+      to: 'tmp_densew_lo_\1'
+  - copy:
+      from: 'gpt_neox\.layers\.(\d+)\.attention\.dense\.weight::[:, 1536:]'
+      to: 'tmp_densew_hi_\1'
+
+  - assert: { shape: { of: 'tmp_qkvw_lo_(\d+)', is: [3840, 2048] } }
+  - assert: { shape: { of: 'tmp_qkvw_hi_(\d+)', is: [1536, 2048] } }
+  - assert: { shape: { of: 'tmp_qkvb_lo_(\d+)', is: [3840] } }
+  - assert: { shape: { of: 'tmp_qkvb_hi_(\d+)', is: [1536] } }
+  - assert: { shape: { of: 'tmp_densew_lo_(\d+)', is: [2048, 1280] } }
+  - assert: { shape: { of: 'tmp_densew_hi_(\d+)', is: [2048, 512] } }
+  - assert: { count: { of: 'tmp_.*', is: 96 } }
+
+  # --------------------------------------------- drop the full-width originals
+  - delete: { target: 'gpt_neox\.layers\.(\d+)\.attention\.query_key_value\.weight' }
+  - delete: { target: 'gpt_neox\.layers\.(\d+)\.attention\.query_key_value\.bias' }
+  - delete: { target: 'gpt_neox\.layers\.(\d+)\.attention\.dense\.weight' }
+
+  # ---------------------------------- reassemble under the original names
+  - concat:
+      from: ['tmp_qkvw_lo_0', 'tmp_qkvw_hi_0']
+      to: 'gpt_neox.layers.0.attention.query_key_value.weight'
+      dim: 0
+  - concat:
+      from: ['tmp_qkvb_lo_0', 'tmp_qkvb_hi_0']
+      to: 'gpt_neox.layers.0.attention.query_key_value.bias'
+      dim: 0
+  - concat:
+      from: ['tmp_densew_lo_0', 'tmp_densew_hi_0']
+      to: 'gpt_neox.layers.0.attention.dense.weight'
+      dim: 1
+  - concat:
+      from: ['tmp_qkvw_lo_1', 'tmp_qkvw_hi_1']
+      to: 'gpt_neox.layers.1.attention.query_key_value.weight'
+      dim: 0
+  - concat:
+      from: ['tmp_qkvb_lo_1', 'tmp_qkvb_hi_1']
+      to: 'gpt_neox.layers.1.attention.query_key_value.bias'
+      dim: 0
+  - concat:
+      from: ['tmp_densew_lo_1', 'tmp_densew_hi_1']
+      to: 'gpt_neox.layers.1.attention.dense.weight'
+      dim: 1
+  - concat:
+      from: ['tmp_qkvw_lo_2', 'tmp_qkvw_hi_2']
+      to: 'gpt_neox.layers.2.attention.query_key_value.weight'
+      dim: 0
+  - concat:
+      from: ['tmp_qkvb_lo_2', 'tmp_qkvb_hi_2']
+      to: 'gpt_neox.layers.2.attention.query_key_value.bias'
+      dim: 0
+  - concat:
+      from: ['tmp_densew_lo_2', 'tmp_densew_hi_2']
+      to: 'gpt_neox.layers.2.attention.dense.weight'
+      dim: 1
+  - concat:
+      from: ['tmp_qkvw_lo_3', 'tmp_qkvw_hi_3']
+      to: 'gpt_neox.layers.3.attention.query_key_value.weight'
+      dim: 0
+  - concat:
+      from: ['tmp_qkvb_lo_3', 'tmp_qkvb_hi_3']
+      to: 'gpt_neox.layers.3.attention.query_key_value.bias'
+      dim: 0
+  - concat:
+      from: ['tmp_densew_lo_3', 'tmp_densew_hi_3']
+      to: 'gpt_neox.layers.3.attention.dense.weight'
+      dim: 1
+  - concat:
+      from: ['tmp_qkvw_lo_4', 'tmp_qkvw_hi_4']
+      to: 'gpt_neox.layers.4.attention.query_key_value.weight'
+      dim: 0
+  - concat:
+      from: ['tmp_qkvb_lo_4', 'tmp_qkvb_hi_4']
+      to: 'gpt_neox.layers.4.attention.query_key_value.bias'
+      dim: 0
+  - concat:
+      from: ['tmp_densew_lo_4', 'tmp_densew_hi_4']
+      to: 'gpt_neox.layers.4.attention.dense.weight'
+      dim: 1
+  - concat:
+      from: ['tmp_qkvw_lo_5', 'tmp_qkvw_hi_5']
+      to: 'gpt_neox.layers.5.attention.query_key_value.weight'
+      dim: 0
+  - concat:
+      from: ['tmp_qkvb_lo_5', 'tmp_qkvb_hi_5']
+      to: 'gpt_neox.layers.5.attention.query_key_value.bias'
+      dim: 0
+  - concat:
+      from: ['tmp_densew_lo_5', 'tmp_densew_hi_5']
+      to: 'gpt_neox.layers.5.attention.dense.weight'
+      dim: 1
+  - concat:
+      from: ['tmp_qkvw_lo_6', 'tmp_qkvw_hi_6']
+      to: 'gpt_neox.layers.6.attention.query_key_value.weight'
+      dim: 0
+  - concat:
+      from: ['tmp_qkvb_lo_6', 'tmp_qkvb_hi_6']
+      to: 'gpt_neox.layers.6.attention.query_key_value.bias'
+      dim: 0
+  - concat:
+      from: ['tmp_densew_lo_6', 'tmp_densew_hi_6']
+      to: 'gpt_neox.layers.6.attention.dense.weight'
+      dim: 1
+  - concat:
+      from: ['tmp_qkvw_lo_7', 'tmp_qkvw_hi_7']
+      to: 'gpt_neox.layers.7.attention.query_key_value.weight'
+      dim: 0
+  - concat:
+      from: ['tmp_qkvb_lo_7', 'tmp_qkvb_hi_7']
+      to: 'gpt_neox.layers.7.attention.query_key_value.bias'
+      dim: 0
+  - concat:
+      from: ['tmp_densew_lo_7', 'tmp_densew_hi_7']
+      to: 'gpt_neox.layers.7.attention.dense.weight'
+      dim: 1
+  - concat:
+      from: ['tmp_qkvw_lo_8', 'tmp_qkvw_hi_8']
+      to: 'gpt_neox.layers.8.attention.query_key_value.weight'
+      dim: 0
+  - concat:
+      from: ['tmp_qkvb_lo_8', 'tmp_qkvb_hi_8']
+      to: 'gpt_neox.layers.8.attention.query_key_value.bias'
+      dim: 0
+  - concat:
+      from: ['tmp_densew_lo_8', 'tmp_densew_hi_8']
+      to: 'gpt_neox.layers.8.attention.dense.weight'
+      dim: 1
+  - concat:
+      from: ['tmp_qkvw_lo_9', 'tmp_qkvw_hi_9']
+      to: 'gpt_neox.layers.9.attention.query_key_value.weight'
+      dim: 0
+  - concat:
+      from: ['tmp_qkvb_lo_9', 'tmp_qkvb_hi_9']
+      to: 'gpt_neox.layers.9.attention.query_key_value.bias'
+      dim: 0
+  - concat:
+      from: ['tmp_densew_lo_9', 'tmp_densew_hi_9']
+      to: 'gpt_neox.layers.9.attention.dense.weight'
+      dim: 1
+  - concat:
+      from: ['tmp_qkvw_lo_10', 'tmp_qkvw_hi_10']
+      to: 'gpt_neox.layers.10.attention.query_key_value.weight'
+      dim: 0
+  - concat:
+      from: ['tmp_qkvb_lo_10', 'tmp_qkvb_hi_10']
+      to: 'gpt_neox.layers.10.attention.query_key_value.bias'
+      dim: 0
+  - concat:
+      from: ['tmp_densew_lo_10', 'tmp_densew_hi_10']
+      to: 'gpt_neox.layers.10.attention.dense.weight'
+      dim: 1
+  - concat:
+      from: ['tmp_qkvw_lo_11', 'tmp_qkvw_hi_11']
+      to: 'gpt_neox.layers.11.attention.query_key_value.weight'
+      dim: 0
+  - concat:
+      from: ['tmp_qkvb_lo_11', 'tmp_qkvb_hi_11']
+      to: 'gpt_neox.layers.11.attention.query_key_value.bias'
+      dim: 0
+  - concat:
+      from: ['tmp_densew_lo_11', 'tmp_densew_hi_11']
+      to: 'gpt_neox.layers.11.attention.dense.weight'
+      dim: 1
+  - concat:
+      from: ['tmp_qkvw_lo_12', 'tmp_qkvw_hi_12']
+      to: 'gpt_neox.layers.12.attention.query_key_value.weight'
+      dim: 0
+  - concat:
+      from: ['tmp_qkvb_lo_12', 'tmp_qkvb_hi_12']
+      to: 'gpt_neox.layers.12.attention.query_key_value.bias'
+      dim: 0
+  - concat:
+      from: ['tmp_densew_lo_12', 'tmp_densew_hi_12']
+      to: 'gpt_neox.layers.12.attention.dense.weight'
+      dim: 1
+  - concat:
+      from: ['tmp_qkvw_lo_13', 'tmp_qkvw_hi_13']
+      to: 'gpt_neox.layers.13.attention.query_key_value.weight'
+      dim: 0
+  - concat:
+      from: ['tmp_qkvb_lo_13', 'tmp_qkvb_hi_13']
+      to: 'gpt_neox.layers.13.attention.query_key_value.bias'
+      dim: 0
+  - concat:
+      from: ['tmp_densew_lo_13', 'tmp_densew_hi_13']
+      to: 'gpt_neox.layers.13.attention.dense.weight'
+      dim: 1
+  - concat:
+      from: ['tmp_qkvw_lo_14', 'tmp_qkvw_hi_14']
+      to: 'gpt_neox.layers.14.attention.query_key_value.weight'
+      dim: 0
+  - concat:
+      from: ['tmp_qkvb_lo_14', 'tmp_qkvb_hi_14']
+      to: 'gpt_neox.layers.14.attention.query_key_value.bias'
+      dim: 0
+  - concat:
+      from: ['tmp_densew_lo_14', 'tmp_densew_hi_14']
+      to: 'gpt_neox.layers.14.attention.dense.weight'
+      dim: 1
+  - concat:
+      from: ['tmp_qkvw_lo_15', 'tmp_qkvw_hi_15']
+      to: 'gpt_neox.layers.15.attention.query_key_value.weight'
+      dim: 0
+  - concat:
+      from: ['tmp_qkvb_lo_15', 'tmp_qkvb_hi_15']
+      to: 'gpt_neox.layers.15.attention.query_key_value.bias'
+      dim: 0
+  - concat:
+      from: ['tmp_densew_lo_15', 'tmp_densew_hi_15']
+      to: 'gpt_neox.layers.15.attention.dense.weight'
+      dim: 1
+
+  # ------------------------------------------------- remove the scratch slots
+  - delete: { target: 'tmp_.*' }
+  - assert: { not: { exists: 'tmp_.*' } }
+
+  # ------------------------------------------- required checks (before writing)
+  - assert:
+      shape:
+        of: 'gpt_neox\.layers\.0\.attention\.query_key_value\.weight'
+        is: [5376, 2048]
+  - assert:
+      shape:
+        of: 'gpt_neox\.layers\.0\.attention\.query_key_value\.bias'
+        is: [5376]
+  - assert:
+      shape:
+        of: 'gpt_neox\.layers\.0\.attention\.dense\.weight'
+        is: [2048, 1792]
+  - assert: { count: { of: '.*', is: 244 } }
+
+  # the same shape checks, but for every layer, plus dtype preservation
+  - assert:
+      shape:
+        of: 'gpt_neox\.layers\.(\d+)\.attention\.query_key_value\.weight'
+        is: [5376, 2048]
+  - assert:
+      shape:
+        of: 'gpt_neox\.layers\.(\d+)\.attention\.query_key_value\.bias'
+        is: [5376]
+  - assert:
+      shape:
+        of: 'gpt_neox\.layers\.(\d+)\.attention\.dense\.weight'
+        is: [2048, 1792]
+  - assert: { dtype: { of: 'gpt_neox\.layers\.(\d+)\.attention\.query_key_value\.weight', is: float16 } }
+  - assert: { dtype: { of: 'gpt_neox\.layers\.(\d+)\.attention\.query_key_value\.bias', is: float16 } }
+  - assert: { dtype: { of: 'gpt_neox\.layers\.(\d+)\.attention\.dense\.weight', is: float16 } }
+  # untouched tensors keep their full width
+  - assert: { shape: { of: 'gpt_neox\.layers\.(\d+)\.attention\.dense\.bias', is: [2048] } }
+  - assert: { shape: { of: 'gpt_neox\.layers\.(\d+)\.mlp\.dense_h_to_4h\.weight', is: [8192, 2048] } }
+
+output:
+  path: out/T2/model.safetensors
+  format: safetensors

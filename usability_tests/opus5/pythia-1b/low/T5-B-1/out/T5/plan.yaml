@@ -1,0 +1,49 @@
+inputs:
+  - model::inputs/base/model.safetensors
+  - lora::inputs/lora/adapter_model.safetensors
+
+transforms:
+  # --- pre-flight: exactly 16 adapter pairs ---
+  - assert:
+      all:
+        - count: { of: 'lora::base_model\.model\.gpt_neox\.layers\.\d+\.attention\.query_key_value\.lora_A\.weight', is: 16 }
+        - count: { of: 'lora::base_model\.model\.gpt_neox\.layers\.\d+\.attention\.query_key_value\.lora_B\.weight', is: 16 }
+        - count: { of: 'model::.*', is: 244 }
+
+  # --- delta = B @ A  (float32, from the adapter) ---
+  - matmul:
+      from_a: 'lora::base_model\.model\.gpt_neox\.layers\.(\d+)\.attention\.query_key_value\.lora_B\.weight'
+      from_b: 'lora::base_model.model.gpt_neox.layers.\1.attention.query_key_value.lora_A.weight'
+      to: 'model::bs_delta.\1'
+
+  - assert:
+      all:
+        - count: { of: 'model::bs_delta\.\d+', is: 16 }
+        - shape: { of: 'model::bs_delta.0', is: [6144, 2048] }
+        - dtype: { of: 'model::bs_delta.0', is: float32 }
+
+  # --- scale by lora_alpha / r = 2 (still float32), then back to base dtype ---
+  - scale_: { target: 'model::bs_delta\.\d+', by: 2.0 }
+  - cast_: { target: 'model::bs_delta\.\d+', to: float16 }
+
+  # --- merge into base weights in place ---
+  - add_:
+      from: 'model::bs_delta\.(\d+)'
+      to: 'model::gpt_neox.layers.\1.attention.query_key_value.weight'
+
+  # --- drop every intermediate ---
+  - delete: { target: 'model::bs_delta\.\d+' }
+
+  # --- post-conditions ---
+  - assert:
+      all:
+        - not: { exists: 'model::.*lora_.*' }
+        - not: { exists: 'model::bs_delta.*' }
+        - shape: { of: 'model::gpt_neox.layers.0.attention.query_key_value.weight', is: [6144, 2048] }
+        - dtype: { of: 'model::gpt_neox.layers.0.attention.query_key_value.weight', is: float16 }
+        - count: { of: 'model::.*', is: 244 }
+
+output:
+  path: out/T5
+  format: safetensors
+  shard: 512MB

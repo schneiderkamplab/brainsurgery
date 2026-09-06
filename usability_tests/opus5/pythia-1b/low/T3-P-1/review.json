@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/pythia-1b/P/T3-defective.py",
+  "started_at": "2026-09-05T23:00:35+00:00",
+  "finished_at": "2026-09-05T23:00:41+00:00",
+  "wall_clock_s": 5.7,
+  "tokens_in": 2,
+  "tokens_out": 306,
+  "cost_usd": 0.09902649999999999,
+  "verdict_text": "NO\n\nThe `matrix_re` pattern omits `gpt_neox.layers.<i>.attention.dense.weight`, so only 3 of the 4 projection matrices per layer are cast \u2014 48 tensors in bfloat16 instead of 64, and the 16 `attention.dense.weight` tensors are left in float32. This violates Required result clause 1 (\"Cast exactly the 64 projection matrices listed above to bfloat16\"). The script also weakens the mandated check: it asserts the bfloat16 count equals 48 rather than 64, so the \"exactly 64 tensors are bfloat16\" required check is not implemented and the error passes silently. The remaining behavior (buffer deletion, float32 upcast, name preservation, tensor count of 196, sharding) matches the spec.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "One projection family is missing from the bfloat16 cast pattern (the attention output projection stays float32); the artifact's own count check was adjusted to the wrong number.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/P/T2-defective.py",
+  "started_at": "2026-09-05T22:13:25+00:00",
+  "finished_at": "2026-09-05T22:13:30+00:00",
+  "wall_clock_s": 4.9,
+  "tokens_in": 2,
+  "tokens_out": 211,
+  "cost_usd": 0.0400568,
+  "verdict_text": "NO\n\nThe artifact removes head 6 (`DROP_HEAD = 6`) from every layer's q/k/v/o projections, but the specification requires removing head 5, i.e. keeping rows/columns `0..639, 768..2047` (which excludes the block `640..767`, head index 5). The script instead excludes `768..895` (head index 6), which does not match the required kept-row ranges in clauses 1\u20134 of \"Required result.\" The shape checks all pass since shapes are the same regardless of which head is dropped, so the required checks do not catch this, but the actual tensor values will differ from the hidden reference and fail the bit-exact grading.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The removed head is off by one (head N+1 instead of head N). All shapes are still correct, so the artifact's own shape checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

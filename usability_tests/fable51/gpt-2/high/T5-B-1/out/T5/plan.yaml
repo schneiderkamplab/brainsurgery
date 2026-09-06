@@ -1,0 +1,66 @@
+# T5: merge a PEFT LoRA adapter (r=16, alpha=32, fan_in_fan_out=true) into GPT-2 c_attn
+# weights and write a 100 MiB-sharded safetensors checkpoint.
+#
+# For each layer i:  W[in,out] += (alpha/r) * (B @ A).T   with A:[16,768], B:[2304,16]
+inputs:
+  - base::inputs/base/model.safetensors
+  - lora::inputs/lora/adapter_model.safetensors
+
+transforms:
+  # --- preconditions: exactly 12 adapter pairs, base targets present ---
+  - assert:
+      all:
+        - count: { of: 'lora::base_model\.model\.h\.\d+\.attn\.c_attn\.lora_A\.weight', is: 12 }
+        - count: { of: 'lora::base_model\.model\.h\.\d+\.attn\.c_attn\.lora_B\.weight', is: 12 }
+        - count: { of: 'lora::.*', is: 24 }
+        - count: { of: 'base::h\.\d+\.attn\.c_attn\.weight', is: 12 }
+        - count: { of: 'base::.*', is: 160 }
+        - shape: { of: 'lora::base_model.model.h.0.attn.c_attn.lora_A.weight', is: [16, 768] }
+        - shape: { of: 'lora::base_model.model.h.0.attn.c_attn.lora_B.weight', is: [2304, 16] }
+        - shape: { of: 'base::h.0.attn.c_attn.weight', is: [768, 2304] }
+        - dtype: { of: 'base::h.0.attn.c_attn.weight', is: float32 }
+
+  # --- delta = B @ A  -> [2304, 768]  (nn.Linear [out, in] layout) ---
+  - matmul:
+      from_a: 'lora::base_model\.model\.h\.(\d+)\.attn\.c_attn\.lora_B\.weight'
+      from_b: 'lora::base_model.model.h.\1.attn.c_attn.lora_A.weight'
+      to: 'base::h.\1.attn.c_attn.merge_ba'
+
+  # --- transpose to Conv1D [in, out] = [768, 2304]  (fan_in_fan_out = true) ---
+  - permute:
+      from: 'base::h\.(\d+)\.attn\.c_attn\.merge_ba'
+      to: 'base::h.\1.attn.c_attn.merge_t'
+      order: [1, 0]
+
+  # --- scale by lora_alpha / r = 32 / 16 = 2 ---
+  - scale_: { target: 'base::h\.\d+\.attn\.c_attn\.merge_t', by: 2.0 }
+
+  # --- sanity on the delta before merging ---
+  - assert:
+      all:
+        - count: { of: 'base::h\.\d+\.attn\.c_attn\.merge_t', is: 12 }
+        - shape: { of: 'base::h.0.attn.c_attn.merge_t', is: [768, 2304] }
+        - dtype: { of: 'base::h.0.attn.c_attn.merge_t', is: float32 }
+
+  # --- W += delta (in place, keeps name/shape/dtype) ---
+  - add_:
+      from: 'base::h\.(\d+)\.attn\.c_attn\.merge_t'
+      to: 'base::h.\1.attn.c_attn.weight'
+
+  # --- drop intermediates ---
+  - delete: { target: 'base::h\.\d+\.attn\.c_attn\.merge_(ba|t)' }
+
+  # --- required checks before writing ---
+  - assert:
+      all:
+        - count: { of: 'base::h\.\d+\.attn\.c_attn\.weight', is: 12 }   # 12 merged targets
+        - not: { exists: 'base::.*lora_.*' }                             # no adapter tensors
+        - not: { exists: 'base::.*merge_.*' }                            # no intermediates
+        - shape: { of: 'base::h.0.attn.c_attn.weight', is: [768, 2304] }
+        - dtype: { of: 'base::h.0.attn.c_attn.weight', is: float32 }
+        - count: { of: 'base::.*', is: 160 }                             # exactly 160 tensors
+
+output:
+  path: out/T5
+  format: safetensors
+  shard: 100MB

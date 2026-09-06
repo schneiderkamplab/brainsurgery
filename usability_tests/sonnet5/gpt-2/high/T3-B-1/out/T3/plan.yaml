@@ -1,0 +1,40 @@
+inputs:
+  - model::inputs/base/model.safetensors
+
+transforms:
+  # 1. Cast exactly the 48 large projection matrices to bfloat16, in place
+  #    (name unchanged). Pattern only hits *.weight under attn.c_attn,
+  #    attn.c_proj, mlp.c_fc, mlp.c_proj -- it does not touch the matching
+  #    *.bias tensors, ln_1/ln_2/ln_f, wte, wpe, or the attn.bias buffer.
+  - cast_:
+      target: 'h\.\d+\.(attn\.c_attn|attn\.c_proj|mlp\.c_fc|mlp\.c_proj)\.weight'
+      to: bfloat16
+
+  # 2. Drop the 12 non-parameter causal-mask buffers. Name is 'attn.bias',
+  #    distinct from 'attn.c_attn.bias' / 'attn.c_proj.bias' (real biases),
+  #    so no parameter is touched.
+  - delete:
+      target: 'h\.\d+\.attn\.bias'
+
+  # Required checks: fail loudly before writing if any does not hold.
+  - assert:
+      all:
+        # exactly 48 tensors are bfloat16 (the pattern above matched exactly
+        # 48 tensors and cast_ turned all of them, and only them, bfloat16)
+        - count: { of: 'h\.\d+\.(attn\.c_attn|attn\.c_proj|mlp\.c_fc|mlp\.c_proj)\.weight', is: 48 }
+        - dtype: { of: 'h\.\d+\.(attn\.c_attn|attn\.c_proj|mlp\.c_fc|mlp\.c_proj)\.weight', is: bfloat16 }
+        # h.0.attn.c_attn.weight is bfloat16
+        - dtype: { of: h.0.attn.c_attn.weight, is: bfloat16 }
+        # wte.weight is float32
+        - dtype: { of: wte.weight, is: float32 }
+        # everything else that isn't one of the 48 cast targets stays float32
+        - dtype: { of: '(?!h\.\d+\.(attn\.c_attn|attn\.c_proj|mlp\.c_fc|mlp\.c_proj)\.weight).+', is: float32 }
+        # the buffers are gone
+        - not: { exists: 'h\.\d+\.attn\.bias' }
+        # the output has exactly 148 tensors
+        - count: { of: '.*', is: 148 }
+
+output:
+  path: out/T3
+  format: safetensors
+  shard: 64MB

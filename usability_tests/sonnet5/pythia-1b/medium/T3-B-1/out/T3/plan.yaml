@@ -1,0 +1,60 @@
+inputs:
+  - model::inputs/base/model.safetensors
+
+transforms:
+  # 1. Drop the 48 non-parameter buffers (causal-mask bias, masked_bias scalar,
+  #    rotary inv_freq) before touching dtypes.
+  - delete:
+      target: 'gpt_neox\.layers\.\d+\.attention\.(bias|masked_bias|rotary_emb\.inv_freq)'
+
+  # 2. Upcast everything that remains (embeddings, norms, biases, and the
+  #    projection weights themselves) to float32.
+  - cast_:
+      target: '.*'
+      to: float32
+
+  # 3. Override exactly the 64 large projection matrices to bfloat16
+  #    (float32 -> bfloat16 round-to-nearest-even, equivalent to a direct
+  #    float16 -> bfloat16 cast per the task note).
+  - cast_:
+      target: 'gpt_neox\.layers\.\d+\.(attention\.(query_key_value|dense)|mlp\.(dense_h_to_4h|dense_4h_to_h))\.weight'
+      to: bfloat16
+
+  # --- Required checks ---
+  - assert:
+      count:
+        of: '.*'
+        is: 196
+
+  - assert:
+      count:
+        of: 'gpt_neox\.layers\.\d+\.(attention\.(query_key_value|dense)|mlp\.(dense_h_to_4h|dense_4h_to_h))\.weight'
+        is: 64
+
+  - assert:
+      dtype:
+        of: 'gpt_neox\.layers\.\d+\.(attention\.(query_key_value|dense)|mlp\.(dense_h_to_4h|dense_4h_to_h))\.weight'
+        is: bfloat16
+
+  # Everything that is NOT one of the 64 projection matrices must be float32
+  # -- combined with the two asserts above, this pins the bfloat16 count at
+  # exactly 64 (not just "at least").
+  - assert:
+      dtype:
+        of: '(?!gpt_neox\.layers\.\d+\.(attention\.(query_key_value|dense)|mlp\.(dense_h_to_4h|dense_4h_to_h))\.weight).+'
+        is: float32
+
+  - assert:
+      dtype:
+        of: 'gpt_neox.layers.0.attention.query_key_value.weight'
+        is: bfloat16
+
+  - assert:
+      dtype:
+        of: 'gpt_neox.embed_in.weight'
+        is: float32
+
+output:
+  path: out/T3
+  format: safetensors
+  shard: 256MB

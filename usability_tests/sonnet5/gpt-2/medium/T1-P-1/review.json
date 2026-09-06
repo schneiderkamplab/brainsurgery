@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/P/T1-defective.py",
+  "started_at": "2026-09-05T21:33:27+00:00",
+  "finished_at": "2026-09-05T21:33:33+00:00",
+  "wall_clock_s": 5.9,
+  "tokens_in": 2,
+  "tokens_out": 324,
+  "cost_usd": 0.038871800000000005,
+  "verdict_text": "NO\n\nThe script drops blocks {2, 5, 9} instead of the required {2, 5, 8}, violating \"Required result\" clause 1. Consequently the renumbering mapping is also wrong: it keeps old block 8 as new index 6 and shifts old blocks 10, 11 to new indices 7, 8, instead of the specified mapping (old 8 removed; old 9\u21926, old 10\u21927, old 11\u21928). The \"no tensor of blocks 9, 10, 11 remains\" check would actually fail loudly on a correct input since block 9 is dropped but 10 and 11 are kept and renumbered away \u2014 wait, that check only verifies no *original* indices 9/10/11 remain in the *output naming*, which is trivially true after renumbering regardless of which blocks were dropped, so it does not catch this bug. The output will have exactly 121 tensors and 9 contiguous blocks, passing all \"Required checks,\" but will not bit-exact match the hidden reference, failing grading.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The drop set is off by one: the last dropped block is the one after the specified block (for example blocks 2, 5, 9 instead of 2, 5, 8). Block counts still match, so the artifact's own checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

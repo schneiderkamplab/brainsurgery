@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/P/T2-defective.py",
+  "started_at": "2026-09-05T21:34:22+00:00",
+  "finished_at": "2026-09-05T21:34:27+00:00",
+  "wall_clock_s": 5.7,
+  "tokens_in": 2,
+  "tokens_out": 229,
+  "cost_usd": 0.039251799999999996,
+  "verdict_text": "NO\n\nThe artifact removes head **6** (`DROP_HEAD = 6`), but the specification's Required Result requires removing **head 5**, with explicit kept column/row ranges `0..319, 384..767, 768..1087, 1152..1535, 1536..1855, 1920..2303` for c_attn (dropping columns 320..383 of each 768 segment, i.e. head index 5) and rows `0..319, 384..767` for c_proj. This violates clauses 1\u20133 of \"Required result.\" Although shape checks (2112, 704) pass by coincidence, the actual retained/removed slice does not match the specified block boundaries, so the output will not match the hidden reference bit-exactly.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The removed head is off by one (head N+1 instead of head N). All shapes are still correct, so the artifact's own shape checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

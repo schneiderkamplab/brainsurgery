@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/B/T4-defective.yaml",
+  "started_at": "2026-09-06T01:18:05+00:00",
+  "finished_at": "2026-09-06T01:18:26+00:00",
+  "wall_clock_s": 21.2,
+  "tokens_in": 2,
+  "tokens_out": 689,
+  "cost_usd": 0.215643,
+  "verdict_text": "NO\n\nThe second task vector is taken against the already-merged base, not the unmodified base. After the first `add_` step writes `base + 0.4*(ft1 - base)` into the MLP tensors, the second `subtract_` computes `tv2 = ft2 - (merged base)` instead of `ft2 - base`, so the output is `base + 0.4*(ft1-base) + 0.4*(ft2 - base - 0.4*(ft1-base))`, which violates the formula in Required result step 2 and the ordering requirement in the Objective (\"each task vector must be taken against the unmodified base\"). Additionally, the plan has no assert that exactly 48 tensors were merged, violating the second Required check; the final count of 160 does not establish that, since deleting the temporaries restores 160 regardless of how many MLP tensors matched.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "Task vector 2 is computed against the base after task vector 1 has already been added, so the second delta is taken from the wrong reference point.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

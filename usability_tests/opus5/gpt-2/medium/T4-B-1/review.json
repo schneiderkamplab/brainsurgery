@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/B/T4-defective.yaml",
+  "started_at": "2026-09-05T23:15:08+00:00",
+  "finished_at": "2026-09-05T23:15:25+00:00",
+  "wall_clock_s": 16.7,
+  "tokens_in": 2,
+  "tokens_out": 1234,
+  "cost_usd": 0.12394350000000001,
+  "verdict_text": "NO\n\nThe plan violates the ordering requirement in \"Required result\" step 2 (and the hazard called out in \"Why it is meaningful\"): it applies task vector 1 in place with `add_` into `base::h.<i>.mlp.*` *before* computing task vector 2, so the second `subtract_` takes `ft2` against the already-merged base rather than the unmodified base. The result is `base + 0.24*(ft1-base) + 0.4*(ft2-base)` instead of `base + 0.4*(ft1-base) + 0.4*(ft2-base)`, which is far outside the 1e-5 relative Frobenius tolerance for the 48 merged tensors. Secondarily, the \"Required checks\" bullet \"exactly 48 tensors were merged\" is not implemented \u2014 there is no assert on the count of matched MLP tensors (e.g. `count: { of: 'base::h\\.\\d+\\.mlp\\.c_(fc|proj)\\.(weight|bias)', is: 48 }`), so a silently under-matching regex would not fail the run. The name-equality part of step 1 is also only partially covered: the plan asserts 160 tensors in each input and per-name equality of non-MLP tensors, but never asserts that base itself starts with 160 names or that the three key sets coincide exactly.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "Task vector 2 is computed against the base after task vector 1 has already been added, so the second delta is taken from the wrong reference point.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

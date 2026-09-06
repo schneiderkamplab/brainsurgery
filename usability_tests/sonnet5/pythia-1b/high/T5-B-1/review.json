@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/pythia-1b/B/T5-defective.yaml",
+  "started_at": "2026-09-05T22:44:04+00:00",
+  "finished_at": "2026-09-05T22:44:08+00:00",
+  "wall_clock_s": 4.5,
+  "tokens_in": 2,
+  "tokens_out": 207,
+  "cost_usd": 0.0410748,
+  "verdict_text": "NO\n\nThe plan's own comment admits the defect: the `alpha / r` scale factor of 2 is never applied \u2014 `matmul` computes `B @ A` and it's added directly via `add_` with no multiplication by 2. This violates Required Result clause 1, which mandates `weight += scale * B @ A` with `scale = lora_alpha / r = 2`. As a result every one of the 16 merged weights will be off by a factor of 2 in the delta term, which will fail the grading tolerance (relative Frobenius error \u2264 1e-3) even though the required checks (tensor count, shapes, no lora_ names) will pass.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The adapter scaling factor alpha / r is missing: the raw low-rank product is added.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/P/T1-defective.py",
+  "started_at": "2026-09-05T23:07:13+00:00",
+  "finished_at": "2026-09-05T23:07:22+00:00",
+  "wall_clock_s": 8.7,
+  "tokens_in": 2,
+  "tokens_out": 531,
+  "cost_usd": 0.12758199999999997,
+  "verdict_text": "NO\n\nThe script drops blocks 2, 5, **9** (`DROP = {2, 5, 9}`) instead of blocks 2, 5, 8, violating required-result clause 1. As a consequence the renumbering also diverges from clause 2: it maps old 6\u21924, 7\u21925, 8\u21926, 10\u21927, 11\u21928, whereas the specification requires old 8 to be removed and old 9\u21926, 10\u21927, 11\u21928. The surviving values for indices 6 and later therefore come from the wrong source blocks, so the key set matches but the tensor contents do not, and grading against the hidden reference would fail on bit-exact values. The self-checks do not catch this: the assertions only verify contiguous indices 0..8 and a total of 121 tensors, both of which hold for the wrong drop set, so the required check \"no tensor of blocks 9, 10, 11 remains\" is satisfied vacuously rather than the correct block selection being verified.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The drop set is off by one: the last dropped block is the one after the specified block (for example blocks 2, 5, 9 instead of 2, 5, 8). Block counts still match, so the artifact's own checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

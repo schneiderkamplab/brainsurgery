@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/P/T1-defective.py",
+  "started_at": "2026-09-05T21:06:14+00:00",
+  "finished_at": "2026-09-05T21:06:19+00:00",
+  "wall_clock_s": 5.2,
+  "tokens_in": 2,
+  "tokens_out": 201,
+  "cost_usd": 0.0376238,
+  "verdict_text": "NO\n\nThe script drops blocks {2, 5, 9} instead of the required {2, 5, 8}, and its renumbering map doesn't match the specified mapping (e.g., old 8 stays 8 and old 9 is removed, whereas the spec requires old 8\u21928 removed and old 9\u21926). This violates \"Required result\" clause 1 (must remove blocks 2, 5, 8) and clause 2 (must renumber per the exact given mapping). Although the checks for tensor count and layer contiguity pass, the actual surviving/removed block indices are wrong, so it would fail grading against the hidden reference.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The drop set is off by one: the last dropped block is the one after the specified block (for example blocks 2, 5, 9 instead of 2, 5, 8). Block counts still match, so the artifact's own checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

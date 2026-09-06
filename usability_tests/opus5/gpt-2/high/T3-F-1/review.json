@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/P/T3-defective.py",
+  "started_at": "2026-09-05T23:41:48+00:00",
+  "finished_at": "2026-09-05T23:41:55+00:00",
+  "wall_clock_s": 7.2,
+  "tokens_in": 2,
+  "tokens_out": 433,
+  "cost_usd": 0.09588150000000001,
+  "verdict_text": "NO\n\nThe `matrix_re` pattern omits `attn.c_proj.weight`, matching only `c_attn.weight`, `mlp.c_fc.weight` and `mlp.c_proj.weight` \u2014 so 36 matrices are cast to bfloat16 instead of 48, and the 12 `h.<i>.attn.c_proj.weight` tensors are written as float32. This violates \"Required result\" clause 1 (\"Cast exactly the 48 projection matrices listed above to bfloat16\"), which explicitly includes `h.<i>.attn.c_proj.weight`. The guard that would have caught this was itself weakened to `== 36`, so it violates the \"Required checks\" clause \"exactly 48 tensors are bfloat16\" and fails to fail loudly. The remaining behaviour (buffer deletion, name preservation, 148-tensor count, float32 for everything else, sharding at 64 MiB) matches the specification, assuming `save_sharded_safetensors` implements the stated shard-size and index rules.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "One projection family is missing from the bfloat16 cast pattern (the attention output projection stays float32); the artifact's own count check was adjusted to the wrong number.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

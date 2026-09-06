@@ -1,0 +1,33 @@
+inputs:
+  - base::inputs/base/model.safetensors
+
+transforms:
+  # 1. Remove blocks 2, 6, 10, 14 entirely (escaped dots, anchored by full match).
+  - delete: { target: 'gpt_neox\.layers\.(2|6|10|14)\..*' }
+  - assert: { not: { exists: 'gpt_neox\.layers\.(2|6|10|14)\..*' } }
+
+  # 2. Renumber ascending: every destination index is below its source and
+  #    already vacated, so no move can overwrite a surviving block.
+  - move: { from: 'gpt_neox\.layers\.3\.(.*)',  to: 'gpt_neox.layers.2.\1' }
+  - move: { from: 'gpt_neox\.layers\.4\.(.*)',  to: 'gpt_neox.layers.3.\1' }
+  - move: { from: 'gpt_neox\.layers\.5\.(.*)',  to: 'gpt_neox.layers.4.\1' }
+  - move: { from: 'gpt_neox\.layers\.7\.(.*)',  to: 'gpt_neox.layers.5.\1' }
+  - move: { from: 'gpt_neox\.layers\.8\.(.*)',  to: 'gpt_neox.layers.6.\1' }
+  - move: { from: 'gpt_neox\.layers\.9\.(.*)',  to: 'gpt_neox.layers.7.\1' }
+  - move: { from: 'gpt_neox\.layers\.11\.(.*)', to: 'gpt_neox.layers.8.\1' }
+  - move: { from: 'gpt_neox\.layers\.12\.(.*)', to: 'gpt_neox.layers.9.\1' }
+  - move: { from: 'gpt_neox\.layers\.13\.(.*)', to: 'gpt_neox.layers.10.\1' }
+  - move: { from: 'gpt_neox\.layers\.15\.(.*)', to: 'gpt_neox.layers.11.\1' }
+
+  # 3. Required checks.
+  - assert:
+      all:
+        - not: { exists: 'gpt_neox\.layers\.(1[2-9]|[2-9]\d+)\..*' }
+        - count: { of: 'gpt_neox\.layers\.\d+\.attention\.query_key_value\.weight', is: 12 }
+        - count: { of: 'gpt_neox\.layers\.(\d+)\..*', is: 180 }
+        - count: { of: '.*', is: 184 }
+        - count: { of: 'gpt_neox\.embed_in\.weight|embed_out\.weight|gpt_neox\.final_layer_norm\.(weight|bias)', is: 4 }
+
+output:
+  path: out/T1/model.safetensors
+  format: safetensors

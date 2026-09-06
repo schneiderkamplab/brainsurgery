@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/P/T1-defective.py",
+  "started_at": "2026-09-06T01:30:20+00:00",
+  "finished_at": "2026-09-06T01:30:33+00:00",
+  "wall_clock_s": 13.2,
+  "tokens_in": 2,
+  "tokens_out": 404,
+  "cost_usd": 0.189079,
+  "verdict_text": "NO\n\nThe script drops blocks {2, 6, 10, 15} instead of the required {2, 6, 10, 14}, so block 14 survives and block 15 is deleted. This violates Required result clause 1 (remove blocks 2, 6, 10, 14) and clause 2 (old 15 becomes 11), since output layer 11 will hold old block 14's tensors. The assertions still pass because 12 contiguous blocks and 86 tensors remain, so the error is silent and the grader's bit-exact comparison will fail on all seven tensors of layer 11.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The drop set is off by one: the last dropped block is the one after the specified block (for example blocks 2, 5, 9 instead of 2, 5, 8). Block counts still match, so the artifact's own checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

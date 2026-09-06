@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/P/T4-defective.py",
+  "started_at": "2026-09-05T22:17:12+00:00",
+  "finished_at": "2026-09-05T22:17:21+00:00",
+  "wall_clock_s": 9.1,
+  "tokens_in": 2,
+  "tokens_out": 765,
+  "cost_usd": 0.0425988,
+  "verdict_text": "NO\n\nThe merge formula is computed sequentially instead of independently: `tmp = b + \u03bb(f1-b)`, then `out = tmp + \u03bb(f2-tmp)`, which expands to `0.36\u00b7b + 0.24\u00b7f1 + 0.4\u00b7f2`, not the required `out = base + \u03bb(ft1-base) + \u03bb(ft2-base) = 0.2\u00b7b + 0.4\u00b7f1 + 0.4\u00b7f2`. This takes ft2's task vector against the already-merged `tmp` rather than against the unmodified base, violating Required Result step 2's explicit formula and the ordering hazard the spec warns about (\"each task vector must be taken against the unmodified base, not against a base that the first merge already changed\"). The resulting relative error on all 48 merged tensors will exceed the 1e-5 grading tolerance.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "Task vector 2 is computed against the base after task vector 1 has already been added, so the second delta is taken from the wrong reference point.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

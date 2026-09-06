@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/pythia-1b/P/T5-defective.py",
+  "started_at": "2026-09-05T23:03:08+00:00",
+  "finished_at": "2026-09-05T23:03:14+00:00",
+  "wall_clock_s": 5.8,
+  "tokens_in": 2,
+  "tokens_out": 270,
+  "cost_usd": 0.09753950000000002,
+  "verdict_text": "NO\n\nThe scaling factor is wrong: the script sets `scale = 1.0` (its own comment marks it as a forgotten `alpha / r`) instead of `lora_alpha / r = 32 / 16 = 2`, so each merged weight receives `B @ A` rather than `2 * B @ A`. This violates Required result clause 1, which specifies `weight += scale * B @ A` with `scale = lora_alpha / r = 2`, and the resulting 16 merged tensors would be off by a factor of 2 in the delta term, far exceeding the 1e-3 relative Frobenius tolerance in Grading. Everything else \u2014 name mapping, float32 accumulation with cast back to float16, `fan_in_fan_out` handling, the four required checks, and the 512 MiB sharded export \u2014 matches the specification.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The adapter scaling factor alpha / r is missing: the raw low-rank product is added.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

@@ -1,0 +1,228 @@
+inputs:
+  - model::inputs/base/model.safetensors
+
+transforms:
+  # ---- layer 0: drop head 5 ----
+  - copy: { from: 'gpt_neox.layers.0.attention.query_key_value.weight::[:3840, :]', to: tmp_qkvw_a_0 }
+  - copy: { from: 'gpt_neox.layers.0.attention.query_key_value.weight::[4608:, :]', to: tmp_qkvw_b_0 }
+  - delete: { target: 'gpt_neox.layers.0.attention.query_key_value.weight' }
+  - concat: { from: [tmp_qkvw_a_0, tmp_qkvw_b_0], to: 'gpt_neox.layers.0.attention.query_key_value.weight', dim: 0 }
+  - copy: { from: 'gpt_neox.layers.0.attention.query_key_value.bias::[:3840]', to: tmp_qkvb_a_0 }
+  - copy: { from: 'gpt_neox.layers.0.attention.query_key_value.bias::[4608:]', to: tmp_qkvb_b_0 }
+  - delete: { target: 'gpt_neox.layers.0.attention.query_key_value.bias' }
+  - concat: { from: [tmp_qkvb_a_0, tmp_qkvb_b_0], to: 'gpt_neox.layers.0.attention.query_key_value.bias', dim: 0 }
+  - copy: { from: 'gpt_neox.layers.0.attention.dense.weight::[:, :1280]', to: tmp_dw_a_0 }
+  - copy: { from: 'gpt_neox.layers.0.attention.dense.weight::[:, 1536:]', to: tmp_dw_b_0 }
+  - delete: { target: 'gpt_neox.layers.0.attention.dense.weight' }
+  - concat: { from: [tmp_dw_a_0, tmp_dw_b_0], to: 'gpt_neox.layers.0.attention.dense.weight', dim: 1 }
+  # ---- layer 1: drop head 5 ----
+  - copy: { from: 'gpt_neox.layers.1.attention.query_key_value.weight::[:3840, :]', to: tmp_qkvw_a_1 }
+  - copy: { from: 'gpt_neox.layers.1.attention.query_key_value.weight::[4608:, :]', to: tmp_qkvw_b_1 }
+  - delete: { target: 'gpt_neox.layers.1.attention.query_key_value.weight' }
+  - concat: { from: [tmp_qkvw_a_1, tmp_qkvw_b_1], to: 'gpt_neox.layers.1.attention.query_key_value.weight', dim: 0 }
+  - copy: { from: 'gpt_neox.layers.1.attention.query_key_value.bias::[:3840]', to: tmp_qkvb_a_1 }
+  - copy: { from: 'gpt_neox.layers.1.attention.query_key_value.bias::[4608:]', to: tmp_qkvb_b_1 }
+  - delete: { target: 'gpt_neox.layers.1.attention.query_key_value.bias' }
+  - concat: { from: [tmp_qkvb_a_1, tmp_qkvb_b_1], to: 'gpt_neox.layers.1.attention.query_key_value.bias', dim: 0 }
+  - copy: { from: 'gpt_neox.layers.1.attention.dense.weight::[:, :1280]', to: tmp_dw_a_1 }
+  - copy: { from: 'gpt_neox.layers.1.attention.dense.weight::[:, 1536:]', to: tmp_dw_b_1 }
+  - delete: { target: 'gpt_neox.layers.1.attention.dense.weight' }
+  - concat: { from: [tmp_dw_a_1, tmp_dw_b_1], to: 'gpt_neox.layers.1.attention.dense.weight', dim: 1 }
+  # ---- layer 2: drop head 5 ----
+  - copy: { from: 'gpt_neox.layers.2.attention.query_key_value.weight::[:3840, :]', to: tmp_qkvw_a_2 }
+  - copy: { from: 'gpt_neox.layers.2.attention.query_key_value.weight::[4608:, :]', to: tmp_qkvw_b_2 }
+  - delete: { target: 'gpt_neox.layers.2.attention.query_key_value.weight' }
+  - concat: { from: [tmp_qkvw_a_2, tmp_qkvw_b_2], to: 'gpt_neox.layers.2.attention.query_key_value.weight', dim: 0 }
+  - copy: { from: 'gpt_neox.layers.2.attention.query_key_value.bias::[:3840]', to: tmp_qkvb_a_2 }
+  - copy: { from: 'gpt_neox.layers.2.attention.query_key_value.bias::[4608:]', to: tmp_qkvb_b_2 }
+  - delete: { target: 'gpt_neox.layers.2.attention.query_key_value.bias' }
+  - concat: { from: [tmp_qkvb_a_2, tmp_qkvb_b_2], to: 'gpt_neox.layers.2.attention.query_key_value.bias', dim: 0 }
+  - copy: { from: 'gpt_neox.layers.2.attention.dense.weight::[:, :1280]', to: tmp_dw_a_2 }
+  - copy: { from: 'gpt_neox.layers.2.attention.dense.weight::[:, 1536:]', to: tmp_dw_b_2 }
+  - delete: { target: 'gpt_neox.layers.2.attention.dense.weight' }
+  - concat: { from: [tmp_dw_a_2, tmp_dw_b_2], to: 'gpt_neox.layers.2.attention.dense.weight', dim: 1 }
+  # ---- layer 3: drop head 5 ----
+  - copy: { from: 'gpt_neox.layers.3.attention.query_key_value.weight::[:3840, :]', to: tmp_qkvw_a_3 }
+  - copy: { from: 'gpt_neox.layers.3.attention.query_key_value.weight::[4608:, :]', to: tmp_qkvw_b_3 }
+  - delete: { target: 'gpt_neox.layers.3.attention.query_key_value.weight' }
+  - concat: { from: [tmp_qkvw_a_3, tmp_qkvw_b_3], to: 'gpt_neox.layers.3.attention.query_key_value.weight', dim: 0 }
+  - copy: { from: 'gpt_neox.layers.3.attention.query_key_value.bias::[:3840]', to: tmp_qkvb_a_3 }
+  - copy: { from: 'gpt_neox.layers.3.attention.query_key_value.bias::[4608:]', to: tmp_qkvb_b_3 }
+  - delete: { target: 'gpt_neox.layers.3.attention.query_key_value.bias' }
+  - concat: { from: [tmp_qkvb_a_3, tmp_qkvb_b_3], to: 'gpt_neox.layers.3.attention.query_key_value.bias', dim: 0 }
+  - copy: { from: 'gpt_neox.layers.3.attention.dense.weight::[:, :1280]', to: tmp_dw_a_3 }
+  - copy: { from: 'gpt_neox.layers.3.attention.dense.weight::[:, 1536:]', to: tmp_dw_b_3 }
+  - delete: { target: 'gpt_neox.layers.3.attention.dense.weight' }
+  - concat: { from: [tmp_dw_a_3, tmp_dw_b_3], to: 'gpt_neox.layers.3.attention.dense.weight', dim: 1 }
+  # ---- layer 4: drop head 5 ----
+  - copy: { from: 'gpt_neox.layers.4.attention.query_key_value.weight::[:3840, :]', to: tmp_qkvw_a_4 }
+  - copy: { from: 'gpt_neox.layers.4.attention.query_key_value.weight::[4608:, :]', to: tmp_qkvw_b_4 }
+  - delete: { target: 'gpt_neox.layers.4.attention.query_key_value.weight' }
+  - concat: { from: [tmp_qkvw_a_4, tmp_qkvw_b_4], to: 'gpt_neox.layers.4.attention.query_key_value.weight', dim: 0 }
+  - copy: { from: 'gpt_neox.layers.4.attention.query_key_value.bias::[:3840]', to: tmp_qkvb_a_4 }
+  - copy: { from: 'gpt_neox.layers.4.attention.query_key_value.bias::[4608:]', to: tmp_qkvb_b_4 }
+  - delete: { target: 'gpt_neox.layers.4.attention.query_key_value.bias' }
+  - concat: { from: [tmp_qkvb_a_4, tmp_qkvb_b_4], to: 'gpt_neox.layers.4.attention.query_key_value.bias', dim: 0 }
+  - copy: { from: 'gpt_neox.layers.4.attention.dense.weight::[:, :1280]', to: tmp_dw_a_4 }
+  - copy: { from: 'gpt_neox.layers.4.attention.dense.weight::[:, 1536:]', to: tmp_dw_b_4 }
+  - delete: { target: 'gpt_neox.layers.4.attention.dense.weight' }
+  - concat: { from: [tmp_dw_a_4, tmp_dw_b_4], to: 'gpt_neox.layers.4.attention.dense.weight', dim: 1 }
+  # ---- layer 5: drop head 5 ----
+  - copy: { from: 'gpt_neox.layers.5.attention.query_key_value.weight::[:3840, :]', to: tmp_qkvw_a_5 }
+  - copy: { from: 'gpt_neox.layers.5.attention.query_key_value.weight::[4608:, :]', to: tmp_qkvw_b_5 }
+  - delete: { target: 'gpt_neox.layers.5.attention.query_key_value.weight' }
+  - concat: { from: [tmp_qkvw_a_5, tmp_qkvw_b_5], to: 'gpt_neox.layers.5.attention.query_key_value.weight', dim: 0 }
+  - copy: { from: 'gpt_neox.layers.5.attention.query_key_value.bias::[:3840]', to: tmp_qkvb_a_5 }
+  - copy: { from: 'gpt_neox.layers.5.attention.query_key_value.bias::[4608:]', to: tmp_qkvb_b_5 }
+  - delete: { target: 'gpt_neox.layers.5.attention.query_key_value.bias' }
+  - concat: { from: [tmp_qkvb_a_5, tmp_qkvb_b_5], to: 'gpt_neox.layers.5.attention.query_key_value.bias', dim: 0 }
+  - copy: { from: 'gpt_neox.layers.5.attention.dense.weight::[:, :1280]', to: tmp_dw_a_5 }
+  - copy: { from: 'gpt_neox.layers.5.attention.dense.weight::[:, 1536:]', to: tmp_dw_b_5 }
+  - delete: { target: 'gpt_neox.layers.5.attention.dense.weight' }
+  - concat: { from: [tmp_dw_a_5, tmp_dw_b_5], to: 'gpt_neox.layers.5.attention.dense.weight', dim: 1 }
+  # ---- layer 6: drop head 5 ----
+  - copy: { from: 'gpt_neox.layers.6.attention.query_key_value.weight::[:3840, :]', to: tmp_qkvw_a_6 }
+  - copy: { from: 'gpt_neox.layers.6.attention.query_key_value.weight::[4608:, :]', to: tmp_qkvw_b_6 }
+  - delete: { target: 'gpt_neox.layers.6.attention.query_key_value.weight' }
+  - concat: { from: [tmp_qkvw_a_6, tmp_qkvw_b_6], to: 'gpt_neox.layers.6.attention.query_key_value.weight', dim: 0 }
+  - copy: { from: 'gpt_neox.layers.6.attention.query_key_value.bias::[:3840]', to: tmp_qkvb_a_6 }
+  - copy: { from: 'gpt_neox.layers.6.attention.query_key_value.bias::[4608:]', to: tmp_qkvb_b_6 }
+  - delete: { target: 'gpt_neox.layers.6.attention.query_key_value.bias' }
+  - concat: { from: [tmp_qkvb_a_6, tmp_qkvb_b_6], to: 'gpt_neox.layers.6.attention.query_key_value.bias', dim: 0 }
+  - copy: { from: 'gpt_neox.layers.6.attention.dense.weight::[:, :1280]', to: tmp_dw_a_6 }
+  - copy: { from: 'gpt_neox.layers.6.attention.dense.weight::[:, 1536:]', to: tmp_dw_b_6 }
+  - delete: { target: 'gpt_neox.layers.6.attention.dense.weight' }
+  - concat: { from: [tmp_dw_a_6, tmp_dw_b_6], to: 'gpt_neox.layers.6.attention.dense.weight', dim: 1 }
+  # ---- layer 7: drop head 5 ----
+  - copy: { from: 'gpt_neox.layers.7.attention.query_key_value.weight::[:3840, :]', to: tmp_qkvw_a_7 }
+  - copy: { from: 'gpt_neox.layers.7.attention.query_key_value.weight::[4608:, :]', to: tmp_qkvw_b_7 }
+  - delete: { target: 'gpt_neox.layers.7.attention.query_key_value.weight' }
+  - concat: { from: [tmp_qkvw_a_7, tmp_qkvw_b_7], to: 'gpt_neox.layers.7.attention.query_key_value.weight', dim: 0 }
+  - copy: { from: 'gpt_neox.layers.7.attention.query_key_value.bias::[:3840]', to: tmp_qkvb_a_7 }
+  - copy: { from: 'gpt_neox.layers.7.attention.query_key_value.bias::[4608:]', to: tmp_qkvb_b_7 }
+  - delete: { target: 'gpt_neox.layers.7.attention.query_key_value.bias' }
+  - concat: { from: [tmp_qkvb_a_7, tmp_qkvb_b_7], to: 'gpt_neox.layers.7.attention.query_key_value.bias', dim: 0 }
+  - copy: { from: 'gpt_neox.layers.7.attention.dense.weight::[:, :1280]', to: tmp_dw_a_7 }
+  - copy: { from: 'gpt_neox.layers.7.attention.dense.weight::[:, 1536:]', to: tmp_dw_b_7 }
+  - delete: { target: 'gpt_neox.layers.7.attention.dense.weight' }
+  - concat: { from: [tmp_dw_a_7, tmp_dw_b_7], to: 'gpt_neox.layers.7.attention.dense.weight', dim: 1 }
+  # ---- layer 8: drop head 5 ----
+  - copy: { from: 'gpt_neox.layers.8.attention.query_key_value.weight::[:3840, :]', to: tmp_qkvw_a_8 }
+  - copy: { from: 'gpt_neox.layers.8.attention.query_key_value.weight::[4608:, :]', to: tmp_qkvw_b_8 }
+  - delete: { target: 'gpt_neox.layers.8.attention.query_key_value.weight' }
+  - concat: { from: [tmp_qkvw_a_8, tmp_qkvw_b_8], to: 'gpt_neox.layers.8.attention.query_key_value.weight', dim: 0 }
+  - copy: { from: 'gpt_neox.layers.8.attention.query_key_value.bias::[:3840]', to: tmp_qkvb_a_8 }
+  - copy: { from: 'gpt_neox.layers.8.attention.query_key_value.bias::[4608:]', to: tmp_qkvb_b_8 }
+  - delete: { target: 'gpt_neox.layers.8.attention.query_key_value.bias' }
+  - concat: { from: [tmp_qkvb_a_8, tmp_qkvb_b_8], to: 'gpt_neox.layers.8.attention.query_key_value.bias', dim: 0 }
+  - copy: { from: 'gpt_neox.layers.8.attention.dense.weight::[:, :1280]', to: tmp_dw_a_8 }
+  - copy: { from: 'gpt_neox.layers.8.attention.dense.weight::[:, 1536:]', to: tmp_dw_b_8 }
+  - delete: { target: 'gpt_neox.layers.8.attention.dense.weight' }
+  - concat: { from: [tmp_dw_a_8, tmp_dw_b_8], to: 'gpt_neox.layers.8.attention.dense.weight', dim: 1 }
+  # ---- layer 9: drop head 5 ----
+  - copy: { from: 'gpt_neox.layers.9.attention.query_key_value.weight::[:3840, :]', to: tmp_qkvw_a_9 }
+  - copy: { from: 'gpt_neox.layers.9.attention.query_key_value.weight::[4608:, :]', to: tmp_qkvw_b_9 }
+  - delete: { target: 'gpt_neox.layers.9.attention.query_key_value.weight' }
+  - concat: { from: [tmp_qkvw_a_9, tmp_qkvw_b_9], to: 'gpt_neox.layers.9.attention.query_key_value.weight', dim: 0 }
+  - copy: { from: 'gpt_neox.layers.9.attention.query_key_value.bias::[:3840]', to: tmp_qkvb_a_9 }
+  - copy: { from: 'gpt_neox.layers.9.attention.query_key_value.bias::[4608:]', to: tmp_qkvb_b_9 }
+  - delete: { target: 'gpt_neox.layers.9.attention.query_key_value.bias' }
+  - concat: { from: [tmp_qkvb_a_9, tmp_qkvb_b_9], to: 'gpt_neox.layers.9.attention.query_key_value.bias', dim: 0 }
+  - copy: { from: 'gpt_neox.layers.9.attention.dense.weight::[:, :1280]', to: tmp_dw_a_9 }
+  - copy: { from: 'gpt_neox.layers.9.attention.dense.weight::[:, 1536:]', to: tmp_dw_b_9 }
+  - delete: { target: 'gpt_neox.layers.9.attention.dense.weight' }
+  - concat: { from: [tmp_dw_a_9, tmp_dw_b_9], to: 'gpt_neox.layers.9.attention.dense.weight', dim: 1 }
+  # ---- layer 10: drop head 5 ----
+  - copy: { from: 'gpt_neox.layers.10.attention.query_key_value.weight::[:3840, :]', to: tmp_qkvw_a_10 }
+  - copy: { from: 'gpt_neox.layers.10.attention.query_key_value.weight::[4608:, :]', to: tmp_qkvw_b_10 }
+  - delete: { target: 'gpt_neox.layers.10.attention.query_key_value.weight' }
+  - concat: { from: [tmp_qkvw_a_10, tmp_qkvw_b_10], to: 'gpt_neox.layers.10.attention.query_key_value.weight', dim: 0 }
+  - copy: { from: 'gpt_neox.layers.10.attention.query_key_value.bias::[:3840]', to: tmp_qkvb_a_10 }
+  - copy: { from: 'gpt_neox.layers.10.attention.query_key_value.bias::[4608:]', to: tmp_qkvb_b_10 }
+  - delete: { target: 'gpt_neox.layers.10.attention.query_key_value.bias' }
+  - concat: { from: [tmp_qkvb_a_10, tmp_qkvb_b_10], to: 'gpt_neox.layers.10.attention.query_key_value.bias', dim: 0 }
+  - copy: { from: 'gpt_neox.layers.10.attention.dense.weight::[:, :1280]', to: tmp_dw_a_10 }
+  - copy: { from: 'gpt_neox.layers.10.attention.dense.weight::[:, 1536:]', to: tmp_dw_b_10 }
+  - delete: { target: 'gpt_neox.layers.10.attention.dense.weight' }
+  - concat: { from: [tmp_dw_a_10, tmp_dw_b_10], to: 'gpt_neox.layers.10.attention.dense.weight', dim: 1 }
+  # ---- layer 11: drop head 5 ----
+  - copy: { from: 'gpt_neox.layers.11.attention.query_key_value.weight::[:3840, :]', to: tmp_qkvw_a_11 }
+  - copy: { from: 'gpt_neox.layers.11.attention.query_key_value.weight::[4608:, :]', to: tmp_qkvw_b_11 }
+  - delete: { target: 'gpt_neox.layers.11.attention.query_key_value.weight' }
+  - concat: { from: [tmp_qkvw_a_11, tmp_qkvw_b_11], to: 'gpt_neox.layers.11.attention.query_key_value.weight', dim: 0 }
+  - copy: { from: 'gpt_neox.layers.11.attention.query_key_value.bias::[:3840]', to: tmp_qkvb_a_11 }
+  - copy: { from: 'gpt_neox.layers.11.attention.query_key_value.bias::[4608:]', to: tmp_qkvb_b_11 }
+  - delete: { target: 'gpt_neox.layers.11.attention.query_key_value.bias' }
+  - concat: { from: [tmp_qkvb_a_11, tmp_qkvb_b_11], to: 'gpt_neox.layers.11.attention.query_key_value.bias', dim: 0 }
+  - copy: { from: 'gpt_neox.layers.11.attention.dense.weight::[:, :1280]', to: tmp_dw_a_11 }
+  - copy: { from: 'gpt_neox.layers.11.attention.dense.weight::[:, 1536:]', to: tmp_dw_b_11 }
+  - delete: { target: 'gpt_neox.layers.11.attention.dense.weight' }
+  - concat: { from: [tmp_dw_a_11, tmp_dw_b_11], to: 'gpt_neox.layers.11.attention.dense.weight', dim: 1 }
+  # ---- layer 12: drop head 5 ----
+  - copy: { from: 'gpt_neox.layers.12.attention.query_key_value.weight::[:3840, :]', to: tmp_qkvw_a_12 }
+  - copy: { from: 'gpt_neox.layers.12.attention.query_key_value.weight::[4608:, :]', to: tmp_qkvw_b_12 }
+  - delete: { target: 'gpt_neox.layers.12.attention.query_key_value.weight' }
+  - concat: { from: [tmp_qkvw_a_12, tmp_qkvw_b_12], to: 'gpt_neox.layers.12.attention.query_key_value.weight', dim: 0 }
+  - copy: { from: 'gpt_neox.layers.12.attention.query_key_value.bias::[:3840]', to: tmp_qkvb_a_12 }
+  - copy: { from: 'gpt_neox.layers.12.attention.query_key_value.bias::[4608:]', to: tmp_qkvb_b_12 }
+  - delete: { target: 'gpt_neox.layers.12.attention.query_key_value.bias' }
+  - concat: { from: [tmp_qkvb_a_12, tmp_qkvb_b_12], to: 'gpt_neox.layers.12.attention.query_key_value.bias', dim: 0 }
+  - copy: { from: 'gpt_neox.layers.12.attention.dense.weight::[:, :1280]', to: tmp_dw_a_12 }
+  - copy: { from: 'gpt_neox.layers.12.attention.dense.weight::[:, 1536:]', to: tmp_dw_b_12 }
+  - delete: { target: 'gpt_neox.layers.12.attention.dense.weight' }
+  - concat: { from: [tmp_dw_a_12, tmp_dw_b_12], to: 'gpt_neox.layers.12.attention.dense.weight', dim: 1 }
+  # ---- layer 13: drop head 5 ----
+  - copy: { from: 'gpt_neox.layers.13.attention.query_key_value.weight::[:3840, :]', to: tmp_qkvw_a_13 }
+  - copy: { from: 'gpt_neox.layers.13.attention.query_key_value.weight::[4608:, :]', to: tmp_qkvw_b_13 }
+  - delete: { target: 'gpt_neox.layers.13.attention.query_key_value.weight' }
+  - concat: { from: [tmp_qkvw_a_13, tmp_qkvw_b_13], to: 'gpt_neox.layers.13.attention.query_key_value.weight', dim: 0 }
+  - copy: { from: 'gpt_neox.layers.13.attention.query_key_value.bias::[:3840]', to: tmp_qkvb_a_13 }
+  - copy: { from: 'gpt_neox.layers.13.attention.query_key_value.bias::[4608:]', to: tmp_qkvb_b_13 }
+  - delete: { target: 'gpt_neox.layers.13.attention.query_key_value.bias' }
+  - concat: { from: [tmp_qkvb_a_13, tmp_qkvb_b_13], to: 'gpt_neox.layers.13.attention.query_key_value.bias', dim: 0 }
+  - copy: { from: 'gpt_neox.layers.13.attention.dense.weight::[:, :1280]', to: tmp_dw_a_13 }
+  - copy: { from: 'gpt_neox.layers.13.attention.dense.weight::[:, 1536:]', to: tmp_dw_b_13 }
+  - delete: { target: 'gpt_neox.layers.13.attention.dense.weight' }
+  - concat: { from: [tmp_dw_a_13, tmp_dw_b_13], to: 'gpt_neox.layers.13.attention.dense.weight', dim: 1 }
+  # ---- layer 14: drop head 5 ----
+  - copy: { from: 'gpt_neox.layers.14.attention.query_key_value.weight::[:3840, :]', to: tmp_qkvw_a_14 }
+  - copy: { from: 'gpt_neox.layers.14.attention.query_key_value.weight::[4608:, :]', to: tmp_qkvw_b_14 }
+  - delete: { target: 'gpt_neox.layers.14.attention.query_key_value.weight' }
+  - concat: { from: [tmp_qkvw_a_14, tmp_qkvw_b_14], to: 'gpt_neox.layers.14.attention.query_key_value.weight', dim: 0 }
+  - copy: { from: 'gpt_neox.layers.14.attention.query_key_value.bias::[:3840]', to: tmp_qkvb_a_14 }
+  - copy: { from: 'gpt_neox.layers.14.attention.query_key_value.bias::[4608:]', to: tmp_qkvb_b_14 }
+  - delete: { target: 'gpt_neox.layers.14.attention.query_key_value.bias' }
+  - concat: { from: [tmp_qkvb_a_14, tmp_qkvb_b_14], to: 'gpt_neox.layers.14.attention.query_key_value.bias', dim: 0 }
+  - copy: { from: 'gpt_neox.layers.14.attention.dense.weight::[:, :1280]', to: tmp_dw_a_14 }
+  - copy: { from: 'gpt_neox.layers.14.attention.dense.weight::[:, 1536:]', to: tmp_dw_b_14 }
+  - delete: { target: 'gpt_neox.layers.14.attention.dense.weight' }
+  - concat: { from: [tmp_dw_a_14, tmp_dw_b_14], to: 'gpt_neox.layers.14.attention.dense.weight', dim: 1 }
+  # ---- layer 15: drop head 5 ----
+  - copy: { from: 'gpt_neox.layers.15.attention.query_key_value.weight::[:3840, :]', to: tmp_qkvw_a_15 }
+  - copy: { from: 'gpt_neox.layers.15.attention.query_key_value.weight::[4608:, :]', to: tmp_qkvw_b_15 }
+  - delete: { target: 'gpt_neox.layers.15.attention.query_key_value.weight' }
+  - concat: { from: [tmp_qkvw_a_15, tmp_qkvw_b_15], to: 'gpt_neox.layers.15.attention.query_key_value.weight', dim: 0 }
+  - copy: { from: 'gpt_neox.layers.15.attention.query_key_value.bias::[:3840]', to: tmp_qkvb_a_15 }
+  - copy: { from: 'gpt_neox.layers.15.attention.query_key_value.bias::[4608:]', to: tmp_qkvb_b_15 }
+  - delete: { target: 'gpt_neox.layers.15.attention.query_key_value.bias' }
+  - concat: { from: [tmp_qkvb_a_15, tmp_qkvb_b_15], to: 'gpt_neox.layers.15.attention.query_key_value.bias', dim: 0 }
+  - copy: { from: 'gpt_neox.layers.15.attention.dense.weight::[:, :1280]', to: tmp_dw_a_15 }
+  - copy: { from: 'gpt_neox.layers.15.attention.dense.weight::[:, 1536:]', to: tmp_dw_b_15 }
+  - delete: { target: 'gpt_neox.layers.15.attention.dense.weight' }
+  - concat: { from: [tmp_dw_a_15, tmp_dw_b_15], to: 'gpt_neox.layers.15.attention.dense.weight', dim: 1 }
+  # ---- drop scratch tensors ----
+  - delete: { target: 'tmp_.*' }
+  # ---- required checks ----
+  - assert: { shape: { of: 'gpt_neox.layers.0.attention.query_key_value.weight', is: [5376, 2048] } }
+  - assert: { shape: { of: 'gpt_neox.layers.0.attention.query_key_value.bias', is: [5376] } }
+  - assert: { shape: { of: 'gpt_neox.layers.0.attention.dense.weight', is: [2048, 1792] } }
+  - assert: { count: { of: '.*', is: 244 } }
+  # ---- same checks on every layer ----
+  - assert: { shape: { of: 'gpt_neox\.layers\.\d+\.attention\.query_key_value\.weight', is: [5376, 2048] } }
+  - assert: { shape: { of: 'gpt_neox\.layers\.\d+\.attention\.query_key_value\.bias', is: [5376] } }
+  - assert: { shape: { of: 'gpt_neox\.layers\.\d+\.attention\.dense\.weight', is: [2048, 1792] } }
+  - assert: { count: { of: 'gpt_neox\.layers\.\d+\.attention\.dense\.weight', is: 16 } }
+
+output:
+  path: out/T2/model.safetensors
+  format: safetensors

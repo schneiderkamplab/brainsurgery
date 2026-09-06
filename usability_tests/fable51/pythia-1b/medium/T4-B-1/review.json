@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/pythia-1b/B/T4-defective.yaml",
+  "started_at": "2026-09-06T01:03:36+00:00",
+  "finished_at": "2026-09-06T01:03:57+00:00",
+  "wall_clock_s": 20.6,
+  "tokens_in": 2,
+  "tokens_out": 1567,
+  "cost_usd": 0.279852,
+  "verdict_text": "NO\n\nThe second task vector is computed against the already-modified base, which is exactly the ordering hazard the specification warns about. The plan adds the scaled `tv1` into the base MLP tensors, and only afterwards copies `ft2` to `tv2` and runs `subtract_` with the (now modified) base as `from`, so `tv2 = ft2 - (base + 0.4*(ft1 - base))` instead of `ft2 - base`. The output therefore equals `base + 0.24*(ft1 - base) + 0.4*(ft2 - base)`, violating Required result clause 2 (`out[X] = base[X] + lambda*(ft1[X]-base[X]) + lambda*(ft2[X]-base[X])`) and failing the 1e-3 Frobenius tolerance. Additionally, the plan never asserts that exactly 64 tensors were merged (no `count` of 64 on the MLP pattern), and the step-1 name check only covers the 180 non-MLP names plus total counts, so the \"Required checks\" clauses for the 64-merged count and full same-name verification are not fully implemented.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "Task vector 2 is computed against the base after task vector 1 has already been added, so the second delta is taken from the wrong reference point.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

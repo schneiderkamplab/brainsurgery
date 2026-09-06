@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/B/T5-defective.yaml",
+  "started_at": "2026-09-05T21:24:15+00:00",
+  "finished_at": "2026-09-05T21:24:19+00:00",
+  "wall_clock_s": 3.7,
+  "tokens_in": 2,
+  "tokens_out": 154,
+  "cost_usd": 0.04017280000000001,
+  "verdict_text": "NO\n\nThe plan omits the `scale = alpha / r = 2` factor when computing the delta \u2014 it simply adds raw `B @ A` instead of `2 * B @ A`, as the comment itself admits (\"defect: the alpha / r scale is missing\"). This violates Required Result clause 1, which mandates `weight += scale * B @ A`, and will fail the grading tolerance (relative Frobenius error \u2264 1e-5) for all 32 merged weights.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The adapter scaling factor alpha / r is missing: the raw low-rank product is added.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

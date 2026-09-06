@@ -1,0 +1,45 @@
+inputs:
+  - base::inputs/base/model.safetensors
+  - lora::inputs/lora/adapter_model.safetensors
+
+transforms:
+  # Check: exactly 12 adapter pairs (12 A factors and 12 B factors) and 160 base tensors.
+  - assert: { count: { of: 'lora::base_model\.model\.h\.\d+\.attn\.c_attn\.lora_A\.weight', is: 12 } }
+  - assert: { count: { of: 'lora::base_model\.model\.h\.\d+\.attn\.c_attn\.lora_B\.weight', is: 12 } }
+  - assert: { count: { of: 'base::.*', is: 160 } }
+  - assert: { shape: { of: 'base::h.0.attn.c_attn.weight', is: [768, 2304] } }
+
+  # BA = B @ A -> [2304, 768]; kept as intermediates on the base alias.
+  - matmul:
+      from_a: 'lora::base_model\.model\.h\.(\d+)\.attn\.c_attn\.lora_B\.weight'
+      from_b: 'lora::base_model.model.h.\1.attn.c_attn.lora_A.weight'
+      to: 'base::lora_tmp.\1.ba'
+  - assert: { count: { of: 'base::lora_tmp\.\d+\.ba', is: 12 } }
+  - assert: { shape: { of: 'base::lora_tmp.0.ba', is: [2304, 768] } }
+
+  # scale = lora_alpha / r = 32 / 16 = 2
+  - scale_: { target: 'base::lora_tmp\.\d+\.ba', by: 2.0 }
+
+  # fan_in_fan_out: transpose to Conv1D [in, out] layout.
+  - permute:
+      from: 'base::lora_tmp\.(\d+)\.ba'
+      to: 'base::lora_tmp.\1.delta'
+      order: [1, 0]
+  - assert: { shape: { of: 'base::lora_tmp.0.delta', is: [768, 2304] } }
+
+  # Merge: W += scale * (B @ A).T
+  - add_:
+      from: 'base::lora_tmp\.(\d+)\.delta'
+      to: 'base::h.\1.attn.c_attn.weight'
+
+  # Remove intermediates; required checks before writing.
+  - delete: { target: 'base::lora_tmp\..*' }
+  - assert: { not: { exists: 'base::.*lora_.*' } }
+  - assert: { shape: { of: 'base::h.0.attn.c_attn.weight', is: [768, 2304] } }
+  - assert: { dtype: { of: 'base::h.0.attn.c_attn.weight', is: float32 } }
+  - assert: { count: { of: 'base::.*', is: 160 } }
+
+output:
+  path: out/T5
+  format: safetensors
+  shard: 100MB

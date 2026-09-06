@@ -1,0 +1,76 @@
+inputs:
+  - base::inputs/base/model.safetensors
+  - lora::inputs/lora/adapter_model.safetensors
+
+output:
+  path: out/T5
+  format: safetensors
+  shard: 512MB
+
+transforms:
+  # --- Preflight: confirm the adapter has exactly the 16 pairs we expect ---
+  - assert:
+      count:
+        of: 'lora::base_model\.model\.gpt_neox\.layers\.\d+\.attention\.query_key_value\.lora_A\.weight'
+        is: 16
+  - assert:
+      count:
+        of: 'lora::base_model\.model\.gpt_neox\.layers\.\d+\.attention\.query_key_value\.lora_B\.weight'
+        is: 16
+  - assert:
+      shape:
+        of: 'lora::base_model\.model\.gpt_neox\.layers\.0\.attention\.query_key_value\.lora_A\.weight'
+        is: [16, 2048]
+  - assert:
+      shape:
+        of: 'lora::base_model\.model\.gpt_neox\.layers\.0\.attention\.query_key_value\.lora_B\.weight'
+        is: [6144, 16]
+  - assert:
+      shape:
+        of: 'base::gpt_neox\.layers\.0\.attention\.query_key_value\.weight'
+        is: [6144, 2048]
+  - assert:
+      count:
+        of: 'base::.*'
+        is: 244
+
+  # --- Merge: delta = scale * (B @ A), scale = lora_alpha / r = 32 / 16 = 2 ---
+  # B @ A is computed in float32 (both lora factors are float32), matching the
+  # nn.Linear [out, in] layout of the base weight (fan_in_fan_out = false), so
+  # no transposition is needed.
+  - matmul:
+      from_a: 'lora::base_model\.model\.gpt_neox\.layers\.(\d+)\.attention\.query_key_value\.lora_B\.weight'
+      from_b: 'lora::base_model.model.gpt_neox.layers.\1.attention.query_key_value.lora_A.weight'
+      to: 'base::tmp.qkv_delta.\1'
+  - scale_:
+      target: 'base::tmp\.qkv_delta\.(\d+)'
+      by: 2.0
+  - cast:
+      from: 'base::tmp\.qkv_delta\.(\d+)'
+      to: 'base::tmp.qkv_delta_fp16.\1'
+      dtype: float16
+  - add_:
+      from: 'base::tmp\.qkv_delta_fp16\.(\d+)'
+      to: 'base::gpt_neox.layers.\1.attention.query_key_value.weight'
+
+  # --- Clean up: no adapter tensor, no intermediate tensor survives ---
+  - delete: { target: 'base::tmp\.qkv_delta\.\d+' }
+  - delete: { target: 'base::tmp\.qkv_delta_fp16\.\d+' }
+  - delete: { target: 'lora::.*' }
+
+  # --- Required checks (fail loudly before writing) ---
+  - assert:
+      count:
+        of: 'base::.*'
+        is: 244
+  - assert:
+      shape:
+        of: 'base::gpt_neox\.layers\.0\.attention\.query_key_value\.weight'
+        is: [6144, 2048]
+  - assert:
+      dtype:
+        of: 'base::gpt_neox\.layers\.0\.attention\.query_key_value\.weight'
+        is: float16
+  - assert:
+      not:
+        exists: 'base::.*lora_.*'

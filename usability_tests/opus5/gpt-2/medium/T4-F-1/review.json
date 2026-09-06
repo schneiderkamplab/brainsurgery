@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/P/T4-defective.py",
+  "started_at": "2026-09-05T23:12:20+00:00",
+  "finished_at": "2026-09-05T23:12:27+00:00",
+  "wall_clock_s": 7.3,
+  "tokens_in": 2,
+  "tokens_out": 456,
+  "cost_usd": 0.09571650000000001,
+  "verdict_text": "NO\n\nThe merge applies the second task vector against the already-modified tensor instead of the unmodified base: `tmp = b + \u03bb(f1-b)` then `tmp + \u03bb(f2-tmp)`, which expands to `b + \u03bb(f1-b) + \u03bb(f2-b) \u2212 \u03bb\u00b2(f1-b)` and leaves a spurious `\u22120.16\u00b7(ft1\u2212base)` term. This violates Required result step 2, which specifies `out[X] = base[X] + \u03bb(ft1[X]\u2212base[X]) + \u03bb(ft2[X]\u2212base[X])`, i.e. both task vectors taken against the unmodified base \u2014 the exact ordering hazard the specification calls out. The error is far larger than the 1e-5 relative Frobenius tolerance for the 48 merged tensors, so grading would fail. The verification step, the merged-count and 160-tensor checks, and the pass-through of the other 112 tensors are otherwise correct.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "Task vector 2 is computed against the base after task vector 1 has already been added, so the second delta is taken from the wrong reference point.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

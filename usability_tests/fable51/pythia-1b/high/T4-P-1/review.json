@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/pythia-1b/P/T4-defective.py",
+  "started_at": "2026-09-06T01:44:19+00:00",
+  "finished_at": "2026-09-06T01:44:27+00:00",
+  "wall_clock_s": 8.1,
+  "tokens_in": 2,
+  "tokens_out": 476,
+  "cost_usd": 0.18975,
+  "verdict_text": "NO\n\nThe merge takes the second task vector against the already-modified base rather than the unmodified base: it computes an intermediate `tmp = base + 0.4*(ft1 - base)` and then adds `0.4*(ft2 - tmp)`, so the ft2 delta is measured relative to `tmp`, not `base`. This expands to `base + 0.4*(ft1 - base) + 0.4*(ft2 - base) - 0.16*(ft1 - base)`, which is not the formula in \"Required result\" step 2 (`out[X] = base[X] + lambda*(ft1[X] - base[X]) + lambda*(ft2[X] - base[X])`). It is exactly the ordering hazard the specification warns about (\"each task vector must be taken against the unmodified base, not against a base that the first merge already changed\"), and the error is far larger than the 1e-3 relative Frobenius tolerance. The precondition check, count checks, dtype handling, and output layout are otherwise correct.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "Task vector 2 is computed against the base after task vector 1 has already been added, so the second delta is taken from the wrong reference point.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

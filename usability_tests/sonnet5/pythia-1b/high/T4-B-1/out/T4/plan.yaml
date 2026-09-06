@@ -1,0 +1,127 @@
+# T4: task-vector merge of two Pythia-1B fine-tunes.
+#
+# out[X] = base[X] + 0.4*(ft1[X]-base[X]) + 0.4*(ft2[X]-base[X])  for the 64
+# MLP tensors, computed in float32 then cast back to float16; every other
+# tensor is taken from base unchanged.
+#
+# All new/intermediate tensors are written under the "base" alias (as
+# "scratch.<stage>.<original-name>") so the plan writes to exactly one alias
+# and brainsurgery can infer the output model; the scratch tensors are
+# deleted again before the final checks and the save.
+
+inputs:
+  - base::inputs/base/model.safetensors
+  - ft1::inputs/ft1/model.safetensors
+  - ft2::inputs/ft2/model.safetensors
+
+transforms:
+  # --- 1. Preflight: same tensor names; everything outside the 64 MLP
+  #     tensors is bit-identical across all three checkpoints. ---
+  - assert: { count: { of: 'base::.*', is: 244 } }
+  - assert: { count: { of: 'ft1::.*', is: 244 } }
+  - assert: { count: { of: 'ft2::.*', is: 244 } }
+  - assert:
+      count:
+        of: 'base::gpt_neox\.layers\.\d+\.mlp\.(?:dense_h_to_4h|dense_4h_to_h)\.(?:weight|bias)'
+        is: 64
+  - assert:
+      count:
+        of: 'ft1::gpt_neox\.layers\.\d+\.mlp\.(?:dense_h_to_4h|dense_4h_to_h)\.(?:weight|bias)'
+        is: 64
+  - assert:
+      count:
+        of: 'ft2::gpt_neox\.layers\.\d+\.mlp\.(?:dense_h_to_4h|dense_4h_to_h)\.(?:weight|bias)'
+        is: 64
+  - assert:
+      equal:
+        left: 'base::(?!gpt_neox\.layers\.\d+\.mlp\.(?:dense_h_to_4h|dense_4h_to_h)\.(?:weight|bias)$).+'
+        right: 'ft1::\g<0>'
+  - assert:
+      equal:
+        left: 'base::(?!gpt_neox\.layers\.\d+\.mlp\.(?:dense_h_to_4h|dense_4h_to_h)\.(?:weight|bias)$).+'
+        right: 'ft2::\g<0>'
+  - assert:
+      equal:
+        left: 'ft1::(?!gpt_neox\.layers\.\d+\.mlp\.(?:dense_h_to_4h|dense_4h_to_h)\.(?:weight|bias)$).+'
+        right: 'ft2::\g<0>'
+
+  # --- 2. Snapshot the 64 MLP tensors of all three checkpoints in float32,
+  #     under the base alias, before anything is modified. ---
+  - cast:
+      from: 'base::gpt_neox\.layers\.\d+\.mlp\.(?:dense_h_to_4h|dense_4h_to_h)\.(?:weight|bias)'
+      to: 'base::scratch.b32.\g<0>'
+      dtype: float32
+  - cast:
+      from: 'ft1::gpt_neox\.layers\.\d+\.mlp\.(?:dense_h_to_4h|dense_4h_to_h)\.(?:weight|bias)'
+      to: 'base::scratch.f1_32.\g<0>'
+      dtype: float32
+  - cast:
+      from: 'ft2::gpt_neox\.layers\.\d+\.mlp\.(?:dense_h_to_4h|dense_4h_to_h)\.(?:weight|bias)'
+      to: 'base::scratch.f2_32.\g<0>'
+      dtype: float32
+
+  # --- 3. Task vectors against the unmodified base32 snapshot:
+  #     diff1 = ft1_32 - base32 ; diff2 = ft2_32 - base32 ---
+  - copy:
+      from: 'base::scratch\.f1_32\.(gpt_neox\.layers\.\d+\.mlp\.(?:dense_h_to_4h|dense_4h_to_h)\.(?:weight|bias))'
+      to: 'base::scratch.diff1.\1'
+  - subtract_:
+      from: 'base::scratch\.b32\.(gpt_neox\.layers\.\d+\.mlp\.(?:dense_h_to_4h|dense_4h_to_h)\.(?:weight|bias))'
+      to: 'base::scratch.diff1.\1'
+  - copy:
+      from: 'base::scratch\.f2_32\.(gpt_neox\.layers\.\d+\.mlp\.(?:dense_h_to_4h|dense_4h_to_h)\.(?:weight|bias))'
+      to: 'base::scratch.diff2.\1'
+  - subtract_:
+      from: 'base::scratch\.b32\.(gpt_neox\.layers\.\d+\.mlp\.(?:dense_h_to_4h|dense_4h_to_h)\.(?:weight|bias))'
+      to: 'base::scratch.diff2.\1'
+
+  # --- 4. Scale both task vectors by lambda = 0.4. ---
+  - scale_:
+      target: 'base::scratch\.diff1\.gpt_neox\.layers\.\d+\.mlp\.(?:dense_h_to_4h|dense_4h_to_h)\.(?:weight|bias)'
+      by: 0.4
+  - scale_:
+      target: 'base::scratch\.diff2\.gpt_neox\.layers\.\d+\.mlp\.(?:dense_h_to_4h|dense_4h_to_h)\.(?:weight|bias)'
+      by: 0.4
+
+  # --- 5. merged = base32 + 0.4*diff1 + 0.4*diff2, still in float32. ---
+  - copy:
+      from: 'base::scratch\.b32\.(gpt_neox\.layers\.\d+\.mlp\.(?:dense_h_to_4h|dense_4h_to_h)\.(?:weight|bias))'
+      to: 'base::scratch.merged.\1'
+  - add_:
+      from: 'base::scratch\.diff1\.(gpt_neox\.layers\.\d+\.mlp\.(?:dense_h_to_4h|dense_4h_to_h)\.(?:weight|bias))'
+      to: 'base::scratch.merged.\1'
+  - add_:
+      from: 'base::scratch\.diff2\.(gpt_neox\.layers\.\d+\.mlp\.(?:dense_h_to_4h|dense_4h_to_h)\.(?:weight|bias))'
+      to: 'base::scratch.merged.\1'
+
+  # --- 6. Cast the merged result back to float16 (the base dtype). ---
+  - cast:
+      from: 'base::scratch\.merged\.(gpt_neox\.layers\.\d+\.mlp\.(?:dense_h_to_4h|dense_4h_to_h)\.(?:weight|bias))'
+      to: 'base::scratch.out16.\1'
+      dtype: float16
+
+  # --- 7. Swap the merged tensors into place under their original names. ---
+  - delete:
+      target: 'base::gpt_neox\.layers\.\d+\.mlp\.(?:dense_h_to_4h|dense_4h_to_h)\.(?:weight|bias)'
+  - move:
+      from: 'base::scratch\.out16\.(gpt_neox\.layers\.\d+\.mlp\.(?:dense_h_to_4h|dense_4h_to_h)\.(?:weight|bias))'
+      to: 'base::\1'
+
+  # --- 8. Clean up every scratch temporary. ---
+  - delete: { target: 'base::scratch\..+' }
+
+  # --- 9. Required post-checks: exactly 64 tensors were merged, output has
+  #     exactly 244 tensors, and the merged tensors kept the base dtype. ---
+  - assert: { count: { of: 'base::.*', is: 244 } }
+  - assert:
+      count:
+        of: 'base::gpt_neox\.layers\.\d+\.mlp\.(?:dense_h_to_4h|dense_4h_to_h)\.(?:weight|bias)'
+        is: 64
+  - assert:
+      dtype:
+        of: 'base::gpt_neox\.layers\.\d+\.mlp\.(?:dense_h_to_4h|dense_4h_to_h)\.(?:weight|bias)'
+        is: float16
+
+output:
+  path: out/T4/model.safetensors
+  format: safetensors

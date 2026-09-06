@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/P/T5-defective.py",
+  "started_at": "2026-09-05T23:24:50+00:00",
+  "finished_at": "2026-09-05T23:25:01+00:00",
+  "wall_clock_s": 10.7,
+  "tokens_in": 2,
+  "tokens_out": 278,
+  "cost_usd": 0.0988585,
+  "verdict_text": "NO\n\nThe script sets `scale = 1.0` (with the comment \"defect: alpha / r forgotten\") instead of reading `lora_alpha / r` from `adapter_config.json`, so the merged weights get `W + B @ A` rather than `W + 2 * B @ A`. This violates \"Required result\" clause 1, which mandates `model.layers.<i>.<module>.weight += scale * B @ A` with `scale = lora_alpha / r = 2`, and it would fail grading's 1e-5 relative Frobenius tolerance on the 32 merged tensors. Everything else \u2014 name mapping, `fan_in_fan_out` handling, float32 accumulation, the four required assertions, and the 512 MiB sharded export \u2014 matches the specification.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The adapter scaling factor alpha / r is missing: the raw low-rank product is added.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

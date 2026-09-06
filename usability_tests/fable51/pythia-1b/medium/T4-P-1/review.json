@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/pythia-1b/P/T4-defective.py",
+  "started_at": "2026-09-06T00:58:58+00:00",
+  "finished_at": "2026-09-06T00:59:11+00:00",
+  "wall_clock_s": 13.0,
+  "tokens_in": 2,
+  "tokens_out": 549,
+  "cost_usd": 0.19372,
+  "verdict_text": "NO\n\nThe merge computes the second task vector against the already-modified tensor rather than the unmodified base: it forms `tmp = b + \u03bb(ft1 \u2212 b)` and then `out = tmp + \u03bb(ft2 \u2212 tmp)`, so the second term is `\u03bb(ft2 \u2212 tmp)` instead of `\u03bb(ft2 \u2212 base)`. Algebraically the result is `(1\u2212\u03bb)\u00b7tmp + \u03bb\u00b7ft2`, which differs from the required `base + \u03bb(ft1 \u2212 base) + \u03bb(ft2 \u2212 base)` by `\u03bb\u00b2(ft1 \u2212 base)`, well outside the 1e-3 relative tolerance. This violates Required result step 2 and is exactly the ordering hazard the specification calls out. Everything else (name-set check, shared-tensor equality on the 180 non-MLP tensors, float32 compute with float16 cast, 64 merged and 244 output tensors, base tensors passed through unchanged) matches the specification.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "Task vector 2 is computed against the base after task vector 1 has already been added, so the second delta is taken from the wrong reference point.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

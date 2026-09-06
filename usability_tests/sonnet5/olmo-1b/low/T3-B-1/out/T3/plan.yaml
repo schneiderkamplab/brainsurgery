@@ -1,0 +1,26 @@
+inputs:
+  - model::inputs/base
+
+transforms:
+  - assert: { count: { of: '.*', is: 114 } }
+
+  - cast_:
+      target: 'model\.layers\.\d+\.self_attn\.(q_proj|k_proj|v_proj|o_proj)\.weight'
+      to: bfloat16
+  - cast_:
+      target: 'model\.layers\.\d+\.mlp\.(gate_proj|up_proj|down_proj)\.weight'
+      to: bfloat16
+
+  - assert: { count: { of: 'model\.layers\.\d+\.(self_attn|mlp)\.\w+\.weight', is: 112 } }
+  - assert: { dtype: { of: 'model\.layers\.\d+\.(self_attn|mlp)\.\w+\.weight', is: bfloat16 } }
+  - assert: { count: { of: '(?!model\.layers\.\d+\.(self_attn|mlp)\.\w+\.weight).*', is: 2 } }
+  - assert: { dtype: { of: '(?!model\.layers\.\d+\.(self_attn|mlp)\.\w+\.weight).*', is: float32 } }
+
+  - assert: { dtype: { of: model.layers.0.self_attn.q_proj.weight, is: bfloat16 } }
+  - assert: { dtype: { of: model.embed_tokens.weight, is: float32 } }
+  - assert: { count: { of: '.*', is: 114 } }
+
+output:
+  path: out/T3
+  format: safetensors
+  shard: 256MB

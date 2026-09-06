@@ -1,0 +1,49 @@
+# T5: merge a PEFT LoRA adapter into OLMo-1B-0724-hf and write a sharded checkpoint.
+# scale = lora_alpha / r = 32 / 16 = 2; fan_in_fan_out = false, so delta = B @ A in [out, in].
+inputs:
+  - base::inputs/base
+  - lora::inputs/lora/adapter_model.safetensors
+
+transforms:
+  # Preflight: the adapter must contain exactly 32 A/B pairs, the base tensors must be there.
+  - assert: { count: { of: 'lora::base_model\.model\.model\.layers\.\d+\.self_attn\.[qv]_proj\.lora_A\.weight', is: 32 } }
+  - assert: { count: { of: 'lora::base_model\.model\.model\.layers\.\d+\.self_attn\.[qv]_proj\.lora_B\.weight', is: 32 } }
+  - assert: { count: { of: 'lora::.*', is: 64 } }
+  - assert: { count: { of: 'base::model\.layers\.\d+\.self_attn\.[qv]_proj\.weight', is: 32 } }
+  - assert: { count: { of: 'base::.*', is: 114 } }
+  - assert: { shape: { of: 'lora::base_model\.model\.model\.layers\.\d+\.self_attn\.[qv]_proj\.lora_A\.weight', is: [16, 2048] } }
+  - assert: { shape: { of: 'lora::base_model\.model\.model\.layers\.\d+\.self_attn\.[qv]_proj\.lora_B\.weight', is: [2048, 16] } }
+  - assert: { dtype: { of: 'lora::.*', is: float32 } }
+
+  # delta = B @ A, one intermediate per adapted module, kept on the base alias so the
+  # output alias stays unambiguous.
+  - matmul:
+      from_a: 'lora::base_model\.model\.(model\.layers\.\d+\.self_attn\.[qv]_proj)\.lora_B\.weight'
+      from_b: 'lora::base_model.model.\1.lora_A.weight'
+      to: 'base::__delta.\1'
+  - assert: { count: { of: 'base::__delta\..*', is: 32 } }
+  - assert: { shape: { of: 'base::__delta\..*', is: [2048, 2048] } }
+  - assert: { dtype: { of: 'base::__delta\..*', is: float32 } }
+
+  # scale = lora_alpha / r = 2
+  - scale_: { target: 'base::__delta\..*', by: 2.0 }
+
+  # W += scale * B @ A
+  - add_:
+      from: 'base::__delta\.(model\.layers\.\d+\.self_attn\.[qv]_proj)'
+      to: 'base::\1.weight'
+
+  # Drop the intermediates; nothing from the adapter is ever copied into base.
+  - delete: { target: 'base::__delta\..*' }
+
+  # Required checks before writing.
+  - assert: { not: { exists: 'base::.*lora_.*' } }
+  - assert: { not: { exists: 'base::__delta.*' } }
+  - assert: { shape: { of: 'base::model\.layers\.0\.self_attn\.q_proj\.weight', is: [2048, 2048] } }
+  - assert: { dtype: { of: 'base::model\.layers\.\d+\.self_attn\.[qv]_proj\.weight', is: float32 } }
+  - assert: { count: { of: 'base::.*', is: 114 } }
+
+output:
+  path: out/T5
+  format: safetensors
+  shard: 512MB

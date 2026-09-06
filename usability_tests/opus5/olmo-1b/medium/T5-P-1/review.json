@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/P/T5-defective.py",
+  "started_at": "2026-09-05T23:23:45+00:00",
+  "finished_at": "2026-09-05T23:23:51+00:00",
+  "wall_clock_s": 5.5,
+  "tokens_in": 2,
+  "tokens_out": 231,
+  "cost_usd": 0.0966535,
+  "verdict_text": "NO\n\nThe scaling factor is wrong: the script sets `scale = 1.0` (with an inline comment marking it as a deliberate defect) instead of `lora_alpha / r = 32 / 16 = 2`, even though it loads `adapter_config.json`. This violates \"Required result\" clause 1, which requires `model.layers.<i>.<module>.weight += scale * B @ A` with `scale = 2`; each of the 32 merged weights therefore receives only half the intended delta and would fail the 1e-5 relative Frobenius error check. Everything else \u2014 name mapping, `fan_in_fan_out` handling, the four required assertions, and the 512 MiB sharded export \u2014 matches the specification.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The adapter scaling factor alpha / r is missing: the raw low-rank product is added.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

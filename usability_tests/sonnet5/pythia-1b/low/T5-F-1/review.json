@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/pythia-1b/P/T5-defective.py",
+  "started_at": "2026-09-05T21:28:19+00:00",
+  "finished_at": "2026-09-05T21:28:24+00:00",
+  "wall_clock_s": 5.6,
+  "tokens_in": 2,
+  "tokens_out": 180,
+  "cost_usd": 0.040214799999999995,
+  "verdict_text": "NO\n\nThe script hardcodes `scale = 1.0` with an explicit comment admitting `alpha / r` (which should be `2`) was forgotten, instead of computing `scale = config[\"lora_alpha\"] / config[\"r\"]`. This violates the \"Required result\" clause 1, which mandates `weight += scale * B @ A` with `scale = lora_alpha / r = 2`. The result will produce merged weights with half the required magnitude, causing the relative Frobenius error check in Grading to fail well beyond the 1e-3 tolerance.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The adapter scaling factor alpha / r is missing: the raw low-rank product is added.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

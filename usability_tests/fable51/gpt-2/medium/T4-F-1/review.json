@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/P/T4-defective.py",
+  "started_at": "2026-09-06T01:16:49+00:00",
+  "finished_at": "2026-09-06T01:17:02+00:00",
+  "wall_clock_s": 12.3,
+  "tokens_in": 2,
+  "tokens_out": 395,
+  "cost_usd": 0.183911,
+  "verdict_text": "NO\n\nThe merge in the artifact takes the second task vector against the already-modified base: it computes `tmp = base + 0.4*(ft1 - base)` and then `out = tmp + 0.4*(ft2 - tmp)`, so the second term is `0.4*(ft2 - tmp)` rather than `0.4*(ft2 - base)`. Expanding, this equals the required result minus `0.16*(ft1 - base)`, which is exactly the ordering error the specification warns about. This violates Required result step 2, which defines `out[X] = base[X] + lambda*(ft1[X] - base[X]) + lambda*(ft2[X] - base[X])` with both differences taken against the unmodified base. The precondition checks, the 48 and 160 counts, and the unchanged tensors are otherwise handled correctly.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "Task vector 2 is computed against the base after task vector 1 has already been added, so the second delta is taken from the wrong reference point.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

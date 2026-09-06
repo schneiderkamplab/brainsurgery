@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/pythia-1b/B/T4-defective.yaml",
+  "started_at": "2026-09-05T23:34:22+00:00",
+  "finished_at": "2026-09-05T23:34:41+00:00",
+  "wall_clock_s": 18.9,
+  "tokens_in": 2,
+  "tokens_out": 1359,
+  "cost_usd": 0.1374225,
+  "verdict_text": "NO\n\nThe plan violates the ordering requirement of Required result step 2: the second task vector is computed against an already-merged base. Concretely, `add_` writes `base + 0.4*(ft1-base)` into the base MLP tensors *before* the tv2 block runs, so the later `subtract_` yields `tv2 = ft2 - (base + 0.4*(ft1-base))` instead of `ft2 - base`, and the final result is `base + 0.24*(ft1-base) + 0.4*(ft2-base)` \u2014 the ft1 contribution is short by 40%, well beyond the 1e-3 relative Frobenius tolerance. It also omits a required check: nothing asserts that exactly 64 tensors were merged (only counts of 244 on ft1, ft2 and the final base appear), so a mis-scoped MLP regex would pass silently. A secondary hazard, if BrainSurgery matches tensor names by search rather than full match, is that the unsuffixed MLP patterns would also capture the temporary `.tv1`/`.tv2` tensors, but the ordering defect alone makes the output incorrect.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "Task vector 2 is computed against the base after task vector 1 has already been added, so the second delta is taken from the wrong reference point.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

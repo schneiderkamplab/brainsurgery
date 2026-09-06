@@ -1,0 +1,23 @@
+# T4 participant self-report (condition B: BrainSurgery plan)
+
+- **Final artifact path:** `out/T4/plan.yaml` (output written to `out/T4/model.safetensors`)
+- **Number of times you executed the script or plan:** 1
+- **Which executions failed, and why (one line each):** None; the single execution succeeded.
+- **Pitfalls or surprises you hit (one line each):**
+  - Output-alias inference forces every write onto one alias, so the float32 scratch tensors for the ft1/ft2 task vectors had to be created *on the `base` alias* (`to: base::tmp.tv1.\g<0>`) rather than on the fine-tune aliases.
+  - There is no fused "a + k*(b-a)" transform, so the merge is a sequence of `cast` / `subtract_` / `scale_` / `add_` steps over pattern-matched sets; the ordering hazard is handled by building both task vectors against the untouched float32 base copy before either is added into the accumulator.
+  - `subtract_`/`add_` are `to <- to op from`, i.e. the *destination* is the accumulator; the pattern mapping is driven by `from`, so the task vector had to be the destination of the subtraction (`tv = ft; tv -= base`) rather than the other way round.
+  - The base has 16 `uint8` tensors (`gpt_neox.layers.<i>.attention.bias` masks) among the 244; `assert equal` handles them fine, but a blanket `cast` over "everything" would have corrupted them — restricting every pattern to the MLP names avoided that.
+  - Dots in tensor names must be escaped in the match patterns but are literal in the rewrite target, which is easy to get backwards.
+  - I used the `\g<0>` whole-match rewrite for the `cast` destinations and named groups `\1` for the in-place ops; both forms are documented but the README only shows `\g<0>` for `assert: equal`.
+- **How the required checks are expressed:**
+  - Step-1 verification: `count` of 244 tensors and of 64 MLP tensors per alias, plus `assert equal` of every non-MLP base tensor against `ft1` and `ft2` (`equal` requires each `left` match to have an existing `right`, so this also proves the non-MLP name sets agree). The MLP name sets are pinned because the `cast` of the ft1/ft2 MLP tensors is driven by *their* names and the subsequent `subtract_`/`assign` map them onto base names, which fails if a name is missing.
+  - "Exactly 64 merged": `count` of the scratch accumulator `tmp.merged.*` is asserted to be 64, before and after the float16 cast-back.
+  - "244 tensors in the output": final `count` of `base::.+` is 244, plus `not exists` on any leftover scratch name.
+  - Extra post-conditions: MLP dtype is still `float16`, and the non-MLP tensors are still bit-identical to the inputs after the merge.
+- **Anything in the task text or documentation that was unclear:**
+  - The README documents that the output alias is inferred from which alias the transforms write to, but it is not obvious on a first read that this makes cross-alias scratch space illegal; it took a careful read of "Output behavior" to get the plan right on the first execution.
+  - The docs do not state which side (`from` or `to`) drives pattern expansion for the in-place binary ops (`add_`, `subtract_`); I inferred it from the `assign` description.
+  - The task says "computed in float32, then cast back to float16"; it does not say whether intermediate task vectors also have to be float32 (I kept everything in float32 until the final cast).
+- **Tools used (condition F):** n/a
+- **Approximate time spent, if you can tell:** ~15 minutes, most of it reading `docpack/help.txt` and `docpack/examples/validation.yaml` before writing the plan.

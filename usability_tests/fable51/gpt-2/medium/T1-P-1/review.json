@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/P/T1-defective.py",
+  "started_at": "2026-09-06T01:12:48+00:00",
+  "finished_at": "2026-09-06T01:12:55+00:00",
+  "wall_clock_s": 7.9,
+  "tokens_in": 2,
+  "tokens_out": 421,
+  "cost_usd": 0.18709,
+  "verdict_text": "NO\n\nThe script drops blocks {2, 5, 9}, but the specification's \"Required result\" clause 1 says to remove blocks 2, 5, and 8. As a consequence, old block 8 survives and is renumbered to 6 while old block 9 is deleted, so clause 2's mapping (old 9 becomes 6) is also violated. The output will still have 121 tensors and 9 contiguous blocks, so the script's own assertions pass, but the key-to-value mapping differs from the reference and bit-exact grading will fail. The docstring even states the wrong set, so this is a spec-reading error rather than a typo in one place.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The drop set is off by one: the last dropped block is the one after the specified block (for example blocks 2, 5, 9 instead of 2, 5, 8). Block counts still match, so the artifact's own checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

@@ -1,0 +1,98 @@
+inputs:
+  - base::inputs/base/model.safetensors
+  - ft1::inputs/ft1/model.safetensors
+  - ft2::inputs/ft2/model.safetensors
+
+transforms:
+  - prefixes: { mode: add, alias: work }
+
+  # --- Step 1: verify the three checkpoints agree everywhere except the MLP tensors ---
+  - assert: { count: { of: 'base::.+', is: 244 } }
+  - assert: { count: { of: 'ft1::.+', is: 244 } }
+  - assert: { count: { of: 'ft2::.+', is: 244 } }
+
+  - assert:
+      equal:
+        left: 'base::(?!gpt_neox\.layers\.\d+\.mlp\.)(?!gpt_neox\.layers\.\d+\.attention\.masked_bias).+'
+        right: 'ft1::\g<0>'
+        eps: 0
+  - assert:
+      equal:
+        left: 'base::(?!gpt_neox\.layers\.\d+\.mlp\.)(?!gpt_neox\.layers\.\d+\.attention\.masked_bias).+'
+        right: 'ft2::\g<0>'
+        eps: 0
+
+  # masked_bias is a -inf constant buffer; -inf minus -inf is NaN, so compare it
+  # via a finite clamp instead of the raw equal check.
+  - clamp:
+      from: 'base::(gpt_neox\.layers\.\d+\.attention\.masked_bias)'
+      to: 'work::mb_base.\1'
+      min: -65504
+      max: 65504
+  - clamp:
+      from: 'ft1::(gpt_neox\.layers\.\d+\.attention\.masked_bias)'
+      to: 'work::mb_ft1.\1'
+      min: -65504
+      max: 65504
+  - clamp:
+      from: 'ft2::(gpt_neox\.layers\.\d+\.attention\.masked_bias)'
+      to: 'work::mb_ft2.\1'
+      min: -65504
+      max: 65504
+  - assert:
+      equal: { left: 'work::mb_base\.(.+)', right: 'work::mb_ft1.\1', eps: 0 }
+  - assert:
+      equal: { left: 'work::mb_base\.(.+)', right: 'work::mb_ft2.\1', eps: 0 }
+
+  - assert:
+      count:
+        of: 'base::gpt_neox\.layers\.\d+\.mlp\.(dense_h_to_4h|dense_4h_to_h)\.(weight|bias)'
+        is: 64
+
+  # --- Step 2: task-vector merge of the 64 MLP tensors, computed in float32 ---
+  - cast:
+      from: 'base::(gpt_neox\.layers\.\d+\.mlp\.(dense_h_to_4h|dense_4h_to_h)\.(weight|bias))'
+      to: 'work::base32.\1'
+      dtype: float32
+  - cast:
+      from: 'ft1::(gpt_neox\.layers\.\d+\.mlp\.(dense_h_to_4h|dense_4h_to_h)\.(weight|bias))'
+      to: 'work::ft1_32.\1'
+      dtype: float32
+  - cast:
+      from: 'ft2::(gpt_neox\.layers\.\d+\.mlp\.(dense_h_to_4h|dense_4h_to_h)\.(weight|bias))'
+      to: 'work::ft2_32.\1'
+      dtype: float32
+
+  # d1 = ft1_32 - base32
+  - copy: { from: 'work::ft1_32\.(.+)', to: 'work::d1.\1' }
+  - subtract_: { from: 'work::base32\.(.+)', to: 'work::d1.\1' }
+  - scale_: { target: 'work::d1\..+', by: 0.4 }
+
+  # d2 = ft2_32 - base32
+  - copy: { from: 'work::ft2_32\.(.+)', to: 'work::d2.\1' }
+  - subtract_: { from: 'work::base32\.(.+)', to: 'work::d2.\1' }
+  - scale_: { target: 'work::d2\..+', by: 0.4 }
+
+  # result = base32 + 0.4*d1 + 0.4*d2
+  - copy: { from: 'work::base32\.(.+)', to: 'work::result.\1' }
+  - add_: { from: 'work::d1\.(.+)', to: 'work::result.\1' }
+  - add_: { from: 'work::d2\.(.+)', to: 'work::result.\1' }
+
+  # cast back down to float16 and write into base in place
+  - cast:
+      from: 'work::result\.(.+)'
+      to: 'work::final.\1'
+      dtype: float16
+  - assign: { from: 'work::final\.(.+)', to: 'base::\1' }
+
+  # --- Required checks ---
+  - assert:
+      count:
+        of: 'work::final\..+'
+        is: 64
+  - assert: { count: { of: 'base::.+', is: 244 } }
+
+  - save:
+      path: out/T4/model.safetensors
+      alias: base
+      format: safetensors

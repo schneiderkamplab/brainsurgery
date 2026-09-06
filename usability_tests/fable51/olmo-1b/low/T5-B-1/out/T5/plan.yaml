@@ -1,0 +1,47 @@
+inputs:
+  - base::inputs/base
+  - lora::inputs/lora/adapter_model.safetensors
+
+transforms:
+  # Sanity: the adapter holds exactly 32 A/B pairs for q_proj/v_proj, base has 114 tensors.
+  - assert:
+      all:
+        - count: { of: 'lora::base_model\.model\.model\.layers\.\d+\.self_attn\.[qv]_proj\.lora_A\.weight', is: 32 }
+        - count: { of: 'lora::base_model\.model\.model\.layers\.\d+\.self_attn\.[qv]_proj\.lora_B\.weight', is: 32 }
+        - count: { of: 'lora::.*', is: 64 }
+        - count: { of: 'base::.*', is: 114 }
+
+  # delta = B @ A  ([2048,16] @ [16,2048] -> [2048,2048]), written next to the base weight.
+  - matmul:
+      from_a: 'lora::base_model\.model\.(model\.layers\.\d+\.self_attn\.[qv]_proj)\.lora_B\.weight'
+      from_b: 'lora::base_model.model.\1.lora_A.weight'
+      to: 'base::\1.merge_delta'
+
+  # exactly 32 pairs were found and merged
+  - assert: { count: { of: 'base::model\.layers\.\d+\.self_attn\.[qv]_proj\.merge_delta', is: 32 } }
+  - assert: { shape: { of: 'base::model\.layers\.\d+\.self_attn\.[qv]_proj\.merge_delta', is: [2048, 2048] } }
+
+  # scale = lora_alpha / r = 32 / 16 = 2
+  - scale_: { target: 'base::model\.layers\.\d+\.self_attn\.[qv]_proj\.merge_delta', by: 2.0 }
+
+  # W += scale * B @ A  (fan_in_fan_out = false: no transpose)
+  - add_:
+      from: 'base::(model\.layers\.\d+\.self_attn\.[qv]_proj)\.merge_delta'
+      to: 'base::\1.weight'
+
+  # drop intermediates
+  - delete: { target: 'base::model\.layers\.\d+\.self_attn\.[qv]_proj\.merge_delta' }
+
+  # Required checks before writing
+  - assert:
+      all:
+        - not: { exists: 'base::.*lora_.*' }
+        - not: { exists: 'base::.*merge_delta' }
+        - shape: { of: 'base::model.layers.0.self_attn.q_proj.weight', is: [2048, 2048] }
+        - dtype: { of: 'base::model\.layers\.\d+\.self_attn\.[qv]_proj\.weight', is: float32 }
+        - count: { of: 'base::.*', is: 114 }
+
+output:
+  path: out/T5
+  format: safetensors
+  shard: 512MB

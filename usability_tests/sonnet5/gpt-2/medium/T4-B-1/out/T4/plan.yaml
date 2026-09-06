@@ -1,0 +1,82 @@
+# T4: task-vector merge of two GPT-2 fine-tunes into the base.
+#
+# out[X] = base[X] + lambda*(ft1[X]-base[X]) + lambda*(ft2[X]-base[X])  for the
+# 48 MLP tensors (lambda = 0.4); every other tensor is left as-is in base.
+#
+# All scratch/intermediate tensors are created under the "base" alias (never a
+# separate alias) so brainsurgery can uniquely infer "base" as the single
+# output alias; ft1/ft2 are read-only throughout.
+
+inputs:
+  - base::inputs/base/model.safetensors
+  - ft1::inputs/ft1/model.safetensors
+  - ft2::inputs/ft2/model.safetensors
+
+output:
+  path: out/T4/model.safetensors
+  format: safetensors
+
+transforms:
+  # --- Step 1: precondition checks (must hold before anything is touched) ---
+  - assert: { count: { of: 'base::.*', is: 160 } }
+  - assert: { count: { of: 'ft1::.*', is: 160 } }
+  - assert: { count: { of: 'ft2::.*', is: 160 } }
+  - assert: { count: { of: 'base::h\.\d+\.mlp\.(?:c_fc|c_proj)\.(?:weight|bias)', is: 48 } }
+  - assert: { count: { of: 'ft1::h\.\d+\.mlp\.(?:c_fc|c_proj)\.(?:weight|bias)', is: 48 } }
+  - assert: { count: { of: 'ft2::h\.\d+\.mlp\.(?:c_fc|c_proj)\.(?:weight|bias)', is: 48 } }
+  # every non-MLP tensor is bit-identical across all three checkpoints
+  - assert:
+      equal:
+        left: 'base::(?!h\.\d+\.mlp\.).+'
+        right: 'ft1::\g<0>'
+  - assert:
+      equal:
+        left: 'base::(?!h\.\d+\.mlp\.).+'
+        right: 'ft2::\g<0>'
+
+  # --- Step 2: stage the three MLP snapshots as scratch copies on "base" ---
+  - copy:
+      from: 'base::(h\.\d+\.mlp\.(?:c_fc|c_proj)\.(?:weight|bias))'
+      to: 'base::__b_\1'
+  - copy:
+      from: 'ft1::(h\.\d+\.mlp\.(?:c_fc|c_proj)\.(?:weight|bias))'
+      to: 'base::__d1_\1'
+  - copy:
+      from: 'ft2::(h\.\d+\.mlp\.(?:c_fc|c_proj)\.(?:weight|bias))'
+      to: 'base::__d2_\1'
+
+  # exactly 48 tensors are being merged
+  - assert: { count: { of: 'base::__b_.*', is: 48 } }
+
+  # task vectors: d1 = ft1 - base, d2 = ft2 - base (against the unmodified base)
+  - subtract_:
+      from: 'base::__b_(h\.\d+\.mlp\.(?:c_fc|c_proj)\.(?:weight|bias))'
+      to: 'base::__d1_\1'
+  - subtract_:
+      from: 'base::__b_(h\.\d+\.mlp\.(?:c_fc|c_proj)\.(?:weight|bias))'
+      to: 'base::__d2_\1'
+
+  # scale each task vector by lambda = 0.4
+  - scale_: { target: 'base::__d1_(h\.\d+\.mlp\.(?:c_fc|c_proj)\.(?:weight|bias))', by: 0.4 }
+  - scale_: { target: 'base::__d2_(h\.\d+\.mlp\.(?:c_fc|c_proj)\.(?:weight|bias))', by: 0.4 }
+
+  # accumulate onto the base snapshot: __b <- base + 0.4*d1 + 0.4*d2
+  - add_:
+      from: 'base::__d1_(h\.\d+\.mlp\.(?:c_fc|c_proj)\.(?:weight|bias))'
+      to: 'base::__b_\1'
+  - add_:
+      from: 'base::__d2_(h\.\d+\.mlp\.(?:c_fc|c_proj)\.(?:weight|bias))'
+      to: 'base::__b_\1'
+
+  # write the merged result back over the original MLP tensor names
+  - assign:
+      from: 'base::__b_(h\.\d+\.mlp\.(?:c_fc|c_proj)\.(?:weight|bias))'
+      to: 'base::\1'
+
+  # drop scratch tensors so the output only contains the original 160 names
+  - delete: { target: 'base::__b_.*' }
+  - delete: { target: 'base::__d1_.*' }
+  - delete: { target: 'base::__d2_.*' }
+
+  # --- Required checks: final shape of the output ---
+  - assert: { count: { of: 'base::.*', is: 160 } }

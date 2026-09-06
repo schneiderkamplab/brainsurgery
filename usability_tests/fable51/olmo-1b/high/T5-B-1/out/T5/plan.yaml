@@ -1,0 +1,68 @@
+# T5: merge a PEFT LoRA adapter (r=16, alpha=32, fan_in_fan_out=false) into
+# OLMo-1B-0724-hf and write a sharded dense checkpoint.
+#
+# W += (alpha / r) * B @ A, with B [out, r] and A [r, in], same [out, in]
+# layout as nn.Linear, so no transposition is needed.
+
+inputs:
+  - base::inputs/base
+  - lora::inputs/lora/adapter_model.safetensors
+
+transforms:
+  # Preflight: the adapter has exactly 32 A factors and 32 B factors with the
+  # expected shapes for the q_proj / v_proj targets in layers 0..15.
+  - assert:
+      count:
+        of: 'lora::base_model\.model\.model\.layers\.\d+\.self_attn\.[qv]_proj\.lora_A\.weight'
+        is: 32
+  - assert:
+      count:
+        of: 'lora::base_model\.model\.model\.layers\.\d+\.self_attn\.[qv]_proj\.lora_B\.weight'
+        is: 32
+  - assert:
+      shape: { of: 'lora::base_model\.model\.model\.layers\.0\.self_attn\.q_proj\.lora_A\.weight', is: [16, 2048] }
+  - assert:
+      shape: { of: 'lora::base_model\.model\.model\.layers\.0\.self_attn\.q_proj\.lora_B\.weight', is: [2048, 16] }
+  - assert:
+      count: { of: 'base::.*', is: 114 }
+  - assert:
+      count: { of: 'base::model\.layers\.\d+\.self_attn\.[qv]_proj\.weight', is: 32 }
+
+  # delta = B @ A  ([2048, 16] @ [16, 2048] = [2048, 2048]); the capture from
+  # from_a selects the matching A factor and names the intermediate on the base
+  # alias so that only `base` is written to (and hence exported).
+  - matmul:
+      from_a: 'lora::base_model\.model\.(model\.layers\.\d+\.self_attn\.[qv]_proj)\.lora_B\.weight'
+      from_b: 'lora::base_model.model.\1.lora_A.weight'
+      to: 'base::\1.lora_delta'
+
+  # Required check: exactly 32 adapter pairs were found and multiplied.
+  - assert:
+      count: { of: 'base::.*\.lora_delta', is: 32 }
+  - assert:
+      shape: { of: 'base::model\.layers\.0\.self_attn\.q_proj\.lora_delta', is: [2048, 2048] }
+  - assert:
+      dtype: { of: 'base::model\.layers\.0\.self_attn\.q_proj\.lora_delta', is: float32 }
+
+  # scale = lora_alpha / r = 32 / 16 = 2
+  - scale_: { target: 'base::.*\.lora_delta', by: 2.0 }
+
+  # W += scale * B @ A, in place on the base weight (keeps name, shape, dtype).
+  - add_: { from: 'base::(.*)\.lora_delta', to: 'base::\1.weight' }
+
+  # Drop the intermediates so no adapter-related tensor remains in the output.
+  - delete: { target: 'base::.*\.lora_delta' }
+
+  # Required checks before writing.
+  - assert: { not: { exists: 'base::.*lora_.*' } }
+  - assert:
+      shape: { of: 'base::model\.layers\.0\.self_attn\.q_proj\.weight', is: [2048, 2048] }
+  - assert:
+      dtype: { of: 'base::model\.layers\.0\.self_attn\.q_proj\.weight', is: float32 }
+  - assert:
+      count: { of: 'base::.*', is: 114 }
+
+output:
+  path: out/T5
+  format: safetensors
+  shard: 512MB

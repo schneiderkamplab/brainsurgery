@@ -1,0 +1,26 @@
+inputs:
+  - model::inputs/base/model.safetensors
+
+transforms:
+  - delete: { target: 'gpt_neox\.layers\.2\..*' }
+  - delete: { target: 'gpt_neox\.layers\.6\..*' }
+  - delete: { target: 'gpt_neox\.layers\.10\..*' }
+  - delete: { target: 'gpt_neox\.layers\.14\..*' }
+  - move: { from: 'gpt_neox\.layers\.3\.(.*)', to: 'gpt_neox.layers.2.\1' }
+  - move: { from: 'gpt_neox\.layers\.4\.(.*)', to: 'gpt_neox.layers.3.\1' }
+  - move: { from: 'gpt_neox\.layers\.5\.(.*)', to: 'gpt_neox.layers.4.\1' }
+  - move: { from: 'gpt_neox\.layers\.7\.(.*)', to: 'gpt_neox.layers.5.\1' }
+  - move: { from: 'gpt_neox\.layers\.8\.(.*)', to: 'gpt_neox.layers.6.\1' }
+  - move: { from: 'gpt_neox\.layers\.9\.(.*)', to: 'gpt_neox.layers.7.\1' }
+  - move: { from: 'gpt_neox\.layers\.11\.(.*)', to: 'gpt_neox.layers.8.\1' }
+  - move: { from: 'gpt_neox\.layers\.12\.(.*)', to: 'gpt_neox.layers.9.\1' }
+  - move: { from: 'gpt_neox\.layers\.13\.(.*)', to: 'gpt_neox.layers.10.\1' }
+  - move: { from: 'gpt_neox\.layers\.15\.(.*)', to: 'gpt_neox.layers.11.\1' }
+  - assert: { not: { exists: 'gpt_neox\.layers\.1[2-5]\..*' } }
+  - assert: { count: { of: 'gpt_neox\.layers\.\d+\.attention\.query_key_value\.weight', is: 12 } }
+  - assert: { count: { of: 'gpt_neox\.layers\.\d+\..*', is: 180 } }
+  - assert: { count: { of: '.*', is: 184 } }
+
+output:
+  path: out/T1/model.safetensors
+  format: safetensors

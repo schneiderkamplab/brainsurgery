@@ -1,0 +1,42 @@
+inputs:
+  - model::inputs/base
+
+transforms:
+  # Sanity check on the input before touching anything.
+  - assert: { count: { of: '.*', is: 114 } }
+
+  # 1. Remove every tensor of the dropped blocks (2, 6, 10, 14).
+  - delete: { target: 'model\.layers\.(2|6|10|14)\..*' }
+
+  # 2. Renumber survivors to close the gaps. Each move is issued in an order
+  #    that guarantees the destination block index is unoccupied at the time
+  #    it runs (either it was just deleted above, or its previous occupant
+  #    was already moved out by an earlier step in this list):
+  #      3->2, 4->3, 5->4      (shift by 1)
+  #      7->5, 8->6, 9->7      (shift by 2)
+  #      11->8, 12->9, 13->10  (shift by 3)
+  #      15->11                (shift by 4)
+  - move: { from: 'model\.layers\.3\.(.*)', to: 'model.layers.2.\1' }
+  - move: { from: 'model\.layers\.4\.(.*)', to: 'model.layers.3.\1' }
+  - move: { from: 'model\.layers\.5\.(.*)', to: 'model.layers.4.\1' }
+  - move: { from: 'model\.layers\.7\.(.*)', to: 'model.layers.5.\1' }
+  - move: { from: 'model\.layers\.8\.(.*)', to: 'model.layers.6.\1' }
+  - move: { from: 'model\.layers\.9\.(.*)', to: 'model.layers.7.\1' }
+  - move: { from: 'model\.layers\.11\.(.*)', to: 'model.layers.8.\1' }
+  - move: { from: 'model\.layers\.12\.(.*)', to: 'model.layers.9.\1' }
+  - move: { from: 'model\.layers\.13\.(.*)', to: 'model.layers.10.\1' }
+  - move: { from: 'model\.layers\.15\.(.*)', to: 'model.layers.11.\1' }
+
+  # Required checks: fail loudly if the result is not exactly the 12-layer
+  # checkpoint described in TASK.md.
+  - assert: { not: { exists: 'model\.layers\.(12|13|14|15)\..*' } }
+  - assert: { count: { of: 'model\.layers\.\d+\.self_attn\.q_proj\.weight', is: 12 } }
+  - assert: { count: { of: '.*', is: 86 } }
+
+  # Non-block tensors must be untouched.
+  - assert: { exists: 'model\.embed_tokens\.weight' }
+  - assert: { exists: 'lm_head\.weight' }
+
+output:
+  path: out/T1/model.safetensors
+  format: safetensors

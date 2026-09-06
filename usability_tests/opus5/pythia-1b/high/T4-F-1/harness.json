@@ -1,0 +1,41 @@
+{
+  "phase": "solve",
+  "driver": "run_claude.py",
+  "model_id": "claude-opus-5",
+  "agent": "opus5",
+  "target": "pythia-1b",
+  "effort": "high",
+  "test": "T4",
+  "condition": "F",
+  "repeat": 1,
+  "started_at": "2026-09-06T00:09:50+00:00",
+  "finished_at": "2026-09-06T00:12:44+00:00",
+  "wall_clock_s": 173.6,
+  "exit_code": 0,
+  "cap_hit": "none",
+  "max_turns": 40,
+  "timeout_s": 1800,
+  "turns": 13,
+  "tool_calls": 12,
+  "tokens_in": 26,
+  "tokens_out": 11997,
+  "cache_read_tokens": 424871,
+  "cache_write_tokens": 29607,
+  "tokens_in_total": 454504,
+  "cost_usd": 0.8108835000000001,
+  "duration_api_ms": 145620,
+  "session_id": "a5aea6cc-21d3-4acd-b6c6-207eb07085b8",
+  "result_subtype": "success",
+  "executions": 2,
+  "failed_executions": [
+    {
+      "n": 1,
+      "command": "time .venv/bin/python out/T4/solution.py",
+      "message": ".venv/bin/python out/T4/solution.py  3,99s user 0,36s system 84% cpu 5,115 total",
+      "error_class": ""
+    }
+  ],
+  "first_execution_success": false,
+  "executions_until_first_success": 2,
+  "final_text": "Done. `out/T4/model.safetensors` is written with 244 tensors.\n\n**Approach:** a single script over `safetensors` + `torch` (`out/T4/solution.py`), not mergekit. Mergekit's `task_arithmetic` would do the arithmetic but merges everything it sees and does not verify the task's actual precondition, so the required checks would have needed a separate full-checkpoint pass on top of it anyway \u2014 no gain over expressing the whole thing once.\n\n**Result of the 2 executions:**\n1. Failed \u2014 `crash`: my bit-exact comparison bit-cast tensors to `uint8`, which torch rejects for the checkpoint's 0-dim scalars. Fixed with `reshape(-1)` before the view.\n2. Passed \u2014 180 non-MLP tensors verified identical across base/ft1/ft2, 64 MLP tensors merged at \u03bb=0.4 in float32, 244 tensors written, output re-read and re-checked.\n\n**On the ordering hazard:** both task vectors are taken against the freshly-read base in one float32 expression with a single cast at the end. This matters more than the tolerance suggests \u2014 I checked that the wrong sequential variant (second delta against the already-merged tensor) differs by ~6e-3 relative Frobenius error, 6\u00d7 the 1e-3 grading tolerance. Independent recomputation of the output gives ~2e-4, which is just fp16 rounding.\n\n**Two things worth flagging:**\n- 16 of the 244 tensors are `uint8` (the `attention.bias` mask buffers), not float16, so \"cast back to the base dtype\" has to be per-tensor rather than a blanket `.half()`. They are all outside the merge set, so this changed nothing here, but a blanket cast would have corrupted them.\n- I used byte comparison rather than `torch.equal` for the identity precondition, since `torch.equal` treats NaN as unequal and would report a false violation on an otherwise-shared tensor.\n\nBeyond the in-script assertions, I ran a self-test against tiny synthetic checkpoints confirming the backbone-drift and missing-name guards actually abort rather than passing silently (scratch files removed). `out/T4/REPORT.md` has the full se"
+}

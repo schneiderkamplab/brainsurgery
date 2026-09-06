@@ -1,0 +1,45 @@
+# T3: mixed-precision export of OLMo-1B-0724-hf with 256 MiB sharding.
+inputs:
+  - model::inputs/base
+
+transforms:
+  # Preconditions: the checkpoint is exactly what TASK.md describes.
+  - assert: { count: { of: 'model::.*', is: 114 } }
+  - assert:
+      count:
+        of: 'model::model\.layers\.\d+\.(self_attn\.[qkvo]_proj|mlp\.(gate|up|down)_proj)\.weight'
+        is: 112
+  - assert: { dtype: { of: 'model::.*', is: float32 } }
+
+  # Cast exactly the 112 projection matrices (dots escaped, anchored full-match).
+  - cast_:
+      target: 'model::model\.layers\.\d+\.(self_attn\.[qkvo]_proj|mlp\.(gate|up|down)_proj)\.weight'
+      to: bfloat16
+
+  # Required checks (fail loudly before writing).
+  # "exactly 112 tensors are bfloat16": the 112 projections are bfloat16 and
+  # every other tensor (negative lookahead on the same pattern) is float32,
+  # with 114 tensors in total.
+  - assert:
+      all:
+        - count:
+            of: 'model::model\.layers\.\d+\.(self_attn\.[qkvo]_proj|mlp\.(gate|up|down)_proj)\.weight'
+            is: 112
+        - dtype:
+            of: 'model::model\.layers\.\d+\.(self_attn\.[qkvo]_proj|mlp\.(gate|up|down)_proj)\.weight'
+            is: bfloat16
+        - count:
+            of: 'model::(?!model\.layers\.\d+\.(self_attn\.[qkvo]_proj|mlp\.(gate|up|down)_proj)\.weight$).*'
+            is: 2
+        - dtype:
+            of: 'model::(?!model\.layers\.\d+\.(self_attn\.[qkvo]_proj|mlp\.(gate|up|down)_proj)\.weight$).*'
+            is: float32
+  - assert: { dtype: { of: 'model::model\.layers\.0\.self_attn\.q_proj\.weight', is: bfloat16 } }
+  - assert: { dtype: { of: 'model::model\.embed_tokens\.weight', is: float32 } }
+  - assert: { dtype: { of: 'model::lm_head\.weight', is: float32 } }
+  - assert: { count: { of: 'model::.*', is: 114 } }
+
+output:
+  path: out/T3
+  format: safetensors
+  shard: 256MB

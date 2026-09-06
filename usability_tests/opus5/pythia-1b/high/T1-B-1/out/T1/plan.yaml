@@ -1,0 +1,86 @@
+# T1: Depth pruning with layer renumbering (Pythia-1B, 16 -> 12 blocks).
+#
+# Strategy:
+#   1. Load the checkpoint twice: `model` is the alias we edit and write out,
+#      `orig` is an untouched reference used only by asserts (asserts never
+#      write, so the output alias stays unambiguously `model`).
+#   2. Delete every tensor of blocks 2, 6, 10, 14 by pattern.
+#   3. Renumber the survivors with `move` in ASCENDING source order. Every move
+#      goes to a strictly smaller index whose slot is already free (either
+#      deleted in step 2 or vacated by an earlier move), so no move can ever
+#      overwrite a surviving block -- and `move` refuses to write an existing
+#      destination anyway, so a mistake here fails loudly instead of silently
+#      clobbering a block.
+#   4. Assert the required post-conditions, plus a bit-exact value check of
+#      every surviving block against its original index in `orig`.
+
+inputs:
+  - model::inputs/base/model.safetensors   # edited in place, written to out/T1
+  - orig::inputs/base/model.safetensors    # read-only reference for asserts
+
+output:
+  path: out/T1/model.safetensors
+  format: safetensors
+
+transforms:
+
+  # ---- Preflight: the input really is the 16-block, 244-tensor checkpoint ----
+  - assert: { count: { of: 'model::.*', is: 244 } }
+  - assert: { count: { of: 'model::gpt_neox\.layers\.\d+\.attention\.query_key_value\.weight', is: 16 } }
+  - assert: { exists: 'model::gpt_neox\.layers\.15\.attention\.query_key_value\.weight' }
+  - assert: { shape: { of: 'model::gpt_neox\.layers\.0\.attention\.query_key_value\.weight', is: [6144, 2048] } }
+  - assert: { dtype: { of: 'model::gpt_neox\.layers\.0\.attention\.query_key_value\.weight', is: float16 } }
+
+  # ---- Step 1: drop blocks 2, 6, 10, 14 (all 15 tensors each) ----
+  - assert: { count: { of: 'model::gpt_neox\.layers\.(2|6|10|14)\..*', is: 60 } }
+  - delete: { target: 'model::gpt_neox\.layers\.(2|6|10|14)\..*' }
+  - assert: { not: { exists: 'model::gpt_neox\.layers\.(2|6|10|14)\..*' } }
+  - assert: { count: { of: 'model::.*', is: 184 } }
+
+  # ---- Step 2: renumber survivors, ascending, target slot always free ----
+  - move: { from: 'model::gpt_neox\.layers\.3\.(.*)', to: 'model::gpt_neox.layers.2.\1' }  # old 3 -> new 2
+  - move: { from: 'model::gpt_neox\.layers\.4\.(.*)', to: 'model::gpt_neox.layers.3.\1' }  # old 4 -> new 3
+  - move: { from: 'model::gpt_neox\.layers\.5\.(.*)', to: 'model::gpt_neox.layers.4.\1' }  # old 5 -> new 4
+  - move: { from: 'model::gpt_neox\.layers\.7\.(.*)', to: 'model::gpt_neox.layers.5.\1' }  # old 7 -> new 5
+  - move: { from: 'model::gpt_neox\.layers\.8\.(.*)', to: 'model::gpt_neox.layers.6.\1' }  # old 8 -> new 6
+  - move: { from: 'model::gpt_neox\.layers\.9\.(.*)', to: 'model::gpt_neox.layers.7.\1' }  # old 9 -> new 7
+  - move: { from: 'model::gpt_neox\.layers\.11\.(.*)', to: 'model::gpt_neox.layers.8.\1' }  # old 11 -> new 8
+  - move: { from: 'model::gpt_neox\.layers\.12\.(.*)', to: 'model::gpt_neox.layers.9.\1' }  # old 12 -> new 9
+  - move: { from: 'model::gpt_neox\.layers\.13\.(.*)', to: 'model::gpt_neox.layers.10.\1' }  # old 13 -> new 10
+  - move: { from: 'model::gpt_neox\.layers\.15\.(.*)', to: 'model::gpt_neox.layers.11.\1' }  # old 15 -> new 11
+
+  # ---- Step 3: required checks ----
+
+  # No tensor of blocks 12, 13, 14, 15 remains.
+  - assert: { not: { exists: 'model::gpt_neox\.layers\.(12|13|14|15)\..*' } }
+
+  # Exactly 12 blocks remain, and they are exactly 0..11 (contiguous, no gaps).
+  - assert: { count: { of: 'model::gpt_neox\.layers\.\d+\.attention\.query_key_value\.weight', is: 12 } }
+  - assert: { count: { of: 'model::gpt_neox\.layers\.(0|1|2|3|4|5|6|7|8|9|10|11)\.attention\.query_key_value\.weight', is: 12 } }
+  - assert: { count: { of: 'model::gpt_neox\.layers\.\d+\..*', is: 180 } }
+
+  # The output has exactly 184 tensors.
+  - assert: { count: { of: 'model::.*', is: 184 } }
+
+  # ---- Step 4: bit-exact value/shape/dtype check against the reference ----
+  # Each surviving block must equal its ORIGINAL block, tensor for tensor.
+  # This is what catches a renumbering collision: a clobbered block would still
+  # count as 12 blocks, but would no longer match its source.
+  - assert: { equal: { left: 'model::gpt_neox\.layers\.0\.(.*)', right: 'orig::gpt_neox.layers.0.\1' } }  # new 0 == old 0
+  - assert: { equal: { left: 'model::gpt_neox\.layers\.1\.(.*)', right: 'orig::gpt_neox.layers.1.\1' } }  # new 1 == old 1
+  - assert: { equal: { left: 'model::gpt_neox\.layers\.2\.(.*)', right: 'orig::gpt_neox.layers.3.\1' } }  # new 2 == old 3
+  - assert: { equal: { left: 'model::gpt_neox\.layers\.3\.(.*)', right: 'orig::gpt_neox.layers.4.\1' } }  # new 3 == old 4
+  - assert: { equal: { left: 'model::gpt_neox\.layers\.4\.(.*)', right: 'orig::gpt_neox.layers.5.\1' } }  # new 4 == old 5
+  - assert: { equal: { left: 'model::gpt_neox\.layers\.5\.(.*)', right: 'orig::gpt_neox.layers.7.\1' } }  # new 5 == old 7
+  - assert: { equal: { left: 'model::gpt_neox\.layers\.6\.(.*)', right: 'orig::gpt_neox.layers.8.\1' } }  # new 6 == old 8
+  - assert: { equal: { left: 'model::gpt_neox\.layers\.7\.(.*)', right: 'orig::gpt_neox.layers.9.\1' } }  # new 7 == old 9
+  - assert: { equal: { left: 'model::gpt_neox\.layers\.8\.(.*)', right: 'orig::gpt_neox.layers.11.\1' } }  # new 8 == old 11
+  - assert: { equal: { left: 'model::gpt_neox\.layers\.9\.(.*)', right: 'orig::gpt_neox.layers.12.\1' } }  # new 9 == old 12
+  - assert: { equal: { left: 'model::gpt_neox\.layers\.10\.(.*)', right: 'orig::gpt_neox.layers.13.\1' } }  # new 10 == old 13
+  - assert: { equal: { left: 'model::gpt_neox\.layers\.11\.(.*)', right: 'orig::gpt_neox.layers.15.\1' } }  # new 11 == old 15
+
+  # The 4 non-block tensors are untouched.
+  - assert: { equal: { left: 'model::(gpt_neox\.embed_in\.weight)', right: 'orig::\1' } }
+  - assert: { equal: { left: 'model::(embed_out\.weight)', right: 'orig::\1' } }
+  - assert: { equal: { left: 'model::(gpt_neox\.final_layer_norm\.weight)', right: 'orig::\1' } }
+  - assert: { equal: { left: 'model::(gpt_neox\.final_layer_norm\.bias)', right: 'orig::\1' } }

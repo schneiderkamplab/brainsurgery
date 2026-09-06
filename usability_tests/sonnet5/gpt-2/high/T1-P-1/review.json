@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/P/T1-defective.py",
+  "started_at": "2026-09-05T22:02:38+00:00",
+  "finished_at": "2026-09-05T22:02:45+00:00",
+  "wall_clock_s": 6.6,
+  "tokens_in": 2,
+  "tokens_out": 320,
+  "cost_usd": 0.046562,
+  "verdict_text": "NO\n\nThe script drops blocks {2, 5, 9} instead of the required {2, 5, 8}, violating \"Remove every tensor of blocks 2, 5, 8\" (Required result, clause 1). Consequently the kept set and renumbering mapping are wrong: block 8 survives and is renumbered incorrectly while block 9 is wrongly removed, so old 9\u2192 should map to new 6 but instead 10\u21926, 11\u21927 shift by one relative to spec, producing a different (incorrect) index mapping than specified in clause 2. The \"no tensor of blocks 9, 10, 11 remains\" required check would also fail since block 8's tensors, not 9's, should have been the ones removed \u2014 actually block 9 is removed here so 9,10,11 check passes trivially, but the resulting checkpoint content (which original blocks map to which new indices, and which original block 8 survives) does not match the specified mapping, so the output will not bit-exact match the hidden reference during grading.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The drop set is off by one: the last dropped block is the one after the specified block (for example blocks 2, 5, 9 instead of 2, 5, 8). Block counts still match, so the artifact's own checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

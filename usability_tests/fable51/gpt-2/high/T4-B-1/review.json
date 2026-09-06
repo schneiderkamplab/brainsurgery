@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/B/T4-defective.yaml",
+  "started_at": "2026-09-06T01:29:20+00:00",
+  "finished_at": "2026-09-06T01:29:42+00:00",
+  "wall_clock_s": 21.8,
+  "tokens_in": 2,
+  "tokens_out": 1337,
+  "cost_usd": 0.248013,
+  "verdict_text": "NO\n\nThe second task vector is computed against the already-modified base, which is the exact ordering hazard the specification warns about. After the first `add_` writes `base[X] += 0.4*(ft1[X]-base[X])`, the plan copies `ft2[X]` to `tv2` and then runs `subtract_` with `from: base::h.\\1.\\2`, so `tv2 = ft2[X] - (base[X] + 0.4*(ft1[X]-base[X]))` instead of `ft2[X] - base[X]`. The resulting output is `base + 0.24*(ft1-base) + 0.4*(ft2-base)`, violating Required result step 2 (`out[X] = base[X] + lambda*(ft1[X]-base[X]) + lambda*(ft2[X]-base[X])`) and failing the 1e-5 relative-error grading bound on the 48 merged tensors. Separately, the plan never asserts that exactly 48 tensors were merged (only counts of 160 on ft1, ft2 and the final output), violating the second bullet of Required checks.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "Task vector 2 is computed against the base after task vector 1 has already been added, so the second delta is taken from the wrong reference point.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

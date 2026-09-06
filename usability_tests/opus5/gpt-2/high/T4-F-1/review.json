@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/P/T4-defective.py",
+  "started_at": "2026-09-05T23:43:58+00:00",
+  "finished_at": "2026-09-05T23:44:08+00:00",
+  "wall_clock_s": 9.2,
+  "tokens_in": 2,
+  "tokens_out": 646,
+  "cost_usd": 0.10043149999999999,
+  "verdict_text": "NO\n\nThe merge is applied sequentially rather than as two task vectors against the unmodified base, which is exactly the ordering hazard the spec calls out. It computes `tmp = base + \u03bb(ft1 - base)` and then `out = tmp + \u03bb(ft2 - tmp)`, so the second task vector is taken against the already-merged tensor; expanding gives `0.36*base + 0.24*ft1 + 0.4*ft2` instead of the required `0.2*base + 0.4*ft1 + 0.4*ft2`. This violates \"Required result\" clause 2, whose formula subtracts `base[X]` (not the intermediate) in both terms, and the resulting coefficient error on ft1/base is far above the 1e-5 relative Frobenius tolerance in \"Grading\". The verification of shared names/tensors, the `merged == 48` and `len(out) == 160` assertions, and the output path are otherwise correct.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "Task vector 2 is computed against the base after task vector 1 has already been added, so the second delta is taken from the wrong reference point.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

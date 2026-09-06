@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/P/T4-defective.py",
+  "started_at": "2026-09-06T00:35:38+00:00",
+  "finished_at": "2026-09-06T00:35:45+00:00",
+  "wall_clock_s": 6.3,
+  "tokens_in": 2,
+  "tokens_out": 280,
+  "cost_usd": 0.17905500000000002,
+  "verdict_text": "NO\n\nThe second task vector is taken against the already-modified tensor: the script computes `tmp = b + \u03bb(ft1 - b)` and then `tmp + \u03bb(ft2 - tmp)`, so the ft2 term is `\u03bb(ft2 - tmp)` rather than `\u03bb(ft2 - base)`. This violates Required result step 2, which specifies `out[X] = base[X] + \u03bb(ft1[X] - base[X]) + \u03bb(ft2[X] - base[X])` with both deltas against the unmodified base, and is exactly the ordering hazard the Objective warns about. The result differs from the reference by `\u03bb\u00b2(ft1 - base)`, which will exceed the 1e-5 relative Frobenius tolerance. The shared-tensor verification, the merged-count and 114-tensor checks, and the float32 computation are otherwise as required.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "Task vector 2 is computed against the base after task vector 1 has already been added, so the second delta is taken from the wrong reference point.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

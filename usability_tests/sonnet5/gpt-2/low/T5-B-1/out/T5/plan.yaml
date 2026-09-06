@@ -1,0 +1,64 @@
+inputs:
+  - model::inputs/base/model.safetensors
+  - lora::inputs/lora/adapter_model.safetensors
+
+transforms:
+  # Sanity: adapter has exactly 12 A/B pairs for attn.c_attn.
+  - assert:
+      count:
+        of: 'lora::base_model\.model\.h\.\d+\.attn\.c_attn\.lora_A\.weight'
+        is: 12
+  - assert:
+      count:
+        of: 'lora::base_model\.model\.h\.\d+\.attn\.c_attn\.lora_B\.weight'
+        is: 12
+
+  # raw.<i> = B @ A, shape [2304, 768] (nn.Linear convention).
+  - matmul:
+      from_a: 'lora::base_model\.model\.h\.(\d+)\.attn\.c_attn\.lora_B\.weight'
+      from_b: 'lora::base_model.model.h.\1.attn.c_attn.lora_A.weight'
+      to: 'model::merge.\1.raw'
+
+  - assert:
+      count:
+        of: 'model::merge\.\d+\.raw'
+        is: 12
+
+  # transposed.<i> = raw.<i>.T, shape [768, 2304] (Conv1D convention).
+  - permute:
+      from: 'model::merge\.(\d+)\.raw'
+      to: 'model::merge.\1.transposed'
+      order: [1, 0]
+
+  # scaled.<i> = transposed.<i> * (lora_alpha / r) = transposed.<i> * 2.
+  - scale:
+      from: 'model::merge\.(\d+)\.transposed'
+      to: 'model::merge.\1.scaled'
+      by: 2.0
+
+  # h.<i>.attn.c_attn.weight += scaled.<i>, in-place, keeps name/shape/dtype.
+  - add_:
+      from: 'model::merge\.(\d+)\.scaled'
+      to: 'model::h.\1.attn.c_attn.weight'
+
+  # Drop every intermediate tensor created above; only the merged base remains.
+  - delete:
+      target: 'model::merge\.\d+\.(raw|transposed|scaled)'
+
+  # Required checks.
+  - assert:
+      not:
+        exists: 'model::.*lora_.*'
+  - assert:
+      shape:
+        of: 'model::h.0.attn.c_attn.weight'
+        is: [768, 2304]
+  - assert:
+      count:
+        of: 'model::.*'
+        is: 160
+
+output:
+  path: out/T5
+  format: safetensors
+  shard: 100MB

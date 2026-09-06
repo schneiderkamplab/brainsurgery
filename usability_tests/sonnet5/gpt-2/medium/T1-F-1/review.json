@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/P/T1-defective.py",
+  "started_at": "2026-09-05T21:33:12+00:00",
+  "finished_at": "2026-09-05T21:33:19+00:00",
+  "wall_clock_s": 6.1,
+  "tokens_in": 2,
+  "tokens_out": 274,
+  "cost_usd": 0.0387958,
+  "verdict_text": "NO\n\nThe script drops blocks {2, 5, 9}, but the specification requires dropping blocks {2, 5, 8} (Required result clause 1). This also breaks the renumbering mapping in clause 2: with 9 dropped instead of 8, old block 8 is kept and becomes new index 6, while old blocks 10 and 11 become 7 and 8 \u2014 not matching the specified mapping (old 9\u21926, old 10\u21927, old 11\u21928, with old 8 itself required to be removed). The \"Required checks\" would still superficially pass (121 tensors, 9 blocks, no traces of 9/10/11 \u2014 though block 9 is in fact removed instead of 8), so the failure is silent per the \"Why it is meaningful\" collision-hazard warning, and grading against the hidden reference would fail on key values for old block 8's tensors.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The drop set is off by one: the last dropped block is the one after the specified block (for example blocks 2, 5, 9 instead of 2, 5, 8). Block counts still match, so the artifact's own checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

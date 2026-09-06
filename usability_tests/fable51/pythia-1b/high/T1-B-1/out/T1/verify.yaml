@@ -1,0 +1,22 @@
+# Read-only verification: compare out/T1 against inputs/base per the required mapping.
+inputs:
+  - base::inputs/base/model.safetensors
+  - new::out/T1/model.safetensors
+transforms:
+  - assert: { count: { of: 'new::.*', is: 184 } }
+  - assert: { count: { of: 'new::gpt_neox\.layers\.\d+\.attention\.query_key_value\.weight', is: 12 } }
+  - assert: { not: { exists: 'new::gpt_neox\.layers\.(12|13|14|15)\..*' } }
+  - assert: { equal: { left: 'new::gpt_neox\.layers\.0\.(.*)',  right: 'base::gpt_neox.layers.0.\1' } }
+  - assert: { equal: { left: 'new::gpt_neox\.layers\.1\.(.*)',  right: 'base::gpt_neox.layers.1.\1' } }
+  - assert: { equal: { left: 'new::gpt_neox\.layers\.2\.(.*)',  right: 'base::gpt_neox.layers.3.\1' } }
+  - assert: { equal: { left: 'new::gpt_neox\.layers\.3\.(.*)',  right: 'base::gpt_neox.layers.4.\1' } }
+  - assert: { equal: { left: 'new::gpt_neox\.layers\.4\.(.*)',  right: 'base::gpt_neox.layers.5.\1' } }
+  - assert: { equal: { left: 'new::gpt_neox\.layers\.5\.(.*)',  right: 'base::gpt_neox.layers.7.\1' } }
+  - assert: { equal: { left: 'new::gpt_neox\.layers\.6\.(.*)',  right: 'base::gpt_neox.layers.8.\1' } }
+  - assert: { equal: { left: 'new::gpt_neox\.layers\.7\.(.*)',  right: 'base::gpt_neox.layers.9.\1' } }
+  - assert: { equal: { left: 'new::gpt_neox\.layers\.8\.(.*)',  right: 'base::gpt_neox.layers.11.\1' } }
+  - assert: { equal: { left: 'new::gpt_neox\.layers\.9\.(.*)',  right: 'base::gpt_neox.layers.12.\1' } }
+  - assert: { equal: { left: 'new::gpt_neox\.layers\.10\.(.*)', right: 'base::gpt_neox.layers.13.\1' } }
+  - assert: { equal: { left: 'new::gpt_neox\.layers\.11\.(.*)', right: 'base::gpt_neox.layers.15.\1' } }
+  - assert: { equal: { left: 'new::(?!gpt_neox\.layers\.).+', right: 'base::\g<0>' } }
+  - assert: { count: { of: 'new::(?!gpt_neox\.layers\.).+', is: 4 } }

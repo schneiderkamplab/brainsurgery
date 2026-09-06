@@ -1,0 +1,41 @@
+{
+  "phase": "solve",
+  "driver": "run_claude.py",
+  "model_id": "claude-fable-5-1",
+  "agent": "fable51",
+  "target": "gpt-2",
+  "effort": "low",
+  "test": "T5",
+  "condition": "B",
+  "repeat": 1,
+  "started_at": "2026-09-06T00:29:59+00:00",
+  "finished_at": "2026-09-06T00:32:14+00:00",
+  "wall_clock_s": 134.8,
+  "exit_code": 0,
+  "cap_hit": "none",
+  "max_turns": 40,
+  "timeout_s": 1800,
+  "turns": 11,
+  "tool_calls": 10,
+  "tokens_in": 322,
+  "tokens_out": 6836,
+  "cache_read_tokens": 392682,
+  "cache_write_tokens": 34890,
+  "tokens_in_total": 427894,
+  "cost_usd": 1.1434875,
+  "duration_api_ms": 90433,
+  "session_id": "a5b635a2-90c8-4d75-9c9f-97efa1513e5e",
+  "result_subtype": "success",
+  "executions": 4,
+  "failed_executions": [
+    {
+      "n": 3,
+      "command": "sed -i \"s|  - assert: { writes: { of: 'base::h\\\\\\\\.\\\\\\\\d+\\\\\\\\.attn\\\\\\\\.c_attn\\\\\\\\.weight', ge: 1, lt: 2 } }|  - assert: { writes: { of: 'base::(?!h\\\\\\\\.\\\\\\\\d+\\\\\\\\.attn\\\\\\\\.c_attn\\\\\\\\.weight\\$)(?!lora_tmp\\\\\\\\.).*', lt: 1 } }|\" out/T5/plan.yaml && grep -n writes out/T5/plan.yaml && brainsurgery out/T5",
+      "message": "FileNotFoundError: [Errno 2] No such file or directory: 'out/T5/model.safetensors.index.json'",
+      "error_class": ""
+    }
+  ],
+  "first_execution_success": true,
+  "executions_until_first_success": 1,
+  "final_text": "Done. The plan at `out/T5/plan.yaml` merges the adapter and writes the sharded checkpoint to `out/T5/`, and the report is at `out/T5/REPORT.md`.\n\n**How the plan works.** It loads the base and adapter under two aliases, asserts 12 A and 12 B factors, then uses `matmul` with capture rewrite to compute B @ A per layer into temporary tensors on the base alias. It scales them by 2, transposes with `permute` to the Conv1D layout, adds in place to each `c_attn.weight`, deletes the temporaries, and asserts the required checks before saving with a 100MB shard budget.\n\n**Execution history.** Four runs, three failures before success:\n\n- Run 1 failed because `from_b` is a rewrite template, not a regex, so escaped dots matched nothing.\n- Runs 2 and 3 failed on extra guards I added using the `writes` counter. It counts the initial load as a write and add_ as two, so I dropped that guard. It was not a required check.\n- Run 4 succeeded.\n\n**Verification.** An independent read-only check confirmed the output has 160 tensors with no adapter names, five shards each within budget except `wte.weight` alone in its own shard, merged weights matching the reference with zero relative error, and all other tensors bit-identical to the base."
+}

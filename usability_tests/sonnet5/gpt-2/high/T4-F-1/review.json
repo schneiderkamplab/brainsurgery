@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/P/T4-defective.py",
+  "started_at": "2026-09-05T22:07:32+00:00",
+  "finished_at": "2026-09-05T22:07:42+00:00",
+  "wall_clock_s": 9.7,
+  "tokens_in": 2,
+  "tokens_out": 959,
+  "cost_usd": 0.0447908,
+  "verdict_text": "NO\n\nThe artifact violates Required Result clause 2. The spec requires `out[X] = base[X] + lambda*(ft1[X]-base[X]) + lambda*(ft2[X]-base[X])`, i.e. lambda applied to each task vector measured against the *original* base. The script instead does a sequential interpolation: `tmp = base + \u03bb*(ft1-base)`, then `out = tmp + \u03bb*(ft2-tmp)`, applying the second \u03bb to `ft2` relative to `tmp` (the ft1-merged value) rather than relative to `base`. Algebraically this yields `out = (1-\u03bb)\u00b2\u00b7base + \u03bb(1-\u03bb)\u00b7ft1 + \u03bb\u00b7ft2`, i.e. `0.36\u00b7base + 0.24\u00b7ft1 + 0.4\u00b7ft2`, whereas the spec's formula gives `(1-2\u03bb)\u00b7base + \u03bb\u00b7ft1 + \u03bb\u00b7ft2 = 0.2\u00b7base + 0.4\u00b7ft1 + 0.4\u00b7ft2`. These differ well beyond the 1e-5 relative-Frobenius tolerance for the 48 merged tensors, so the output will not match the hidden reference under Grading.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "Task vector 2 is computed against the base after task vector 1 has already been added, so the second delta is taken from the wrong reference point.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

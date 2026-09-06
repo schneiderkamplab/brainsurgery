@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/pythia-1b/B/T2-defective.yaml",
+  "started_at": "2026-09-06T01:08:38+00:00",
+  "finished_at": "2026-09-06T01:08:44+00:00",
+  "wall_clock_s": 5.6,
+  "tokens_in": 2,
+  "tokens_out": 195,
+  "cost_usd": 0.293462,
+  "verdict_text": "NO\n\nThe plan removes head 6, not head 5. It keeps qkv rows 0..4607 and 5376..6143 (dropping rows 4608..5375, head 6's block) instead of rows 0..3839 and 4608..6143 as required by \"Required result\" clauses 1 and 2. Likewise it keeps dense columns 0..1535 and 1792..2047 (dropping head 6's columns) instead of 0..1279 and 1536..2047 required by clause 3. The output shapes match, so the shape asserts pass, but the values differ from the reference and grading is bit-exact.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The removed head is off by one (head N+1 instead of head N). All shapes are still correct, so the artifact's own shape checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

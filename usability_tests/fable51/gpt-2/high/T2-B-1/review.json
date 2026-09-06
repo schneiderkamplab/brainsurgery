@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/B/T2-defective.yaml",
+  "started_at": "2026-09-06T01:25:39+00:00",
+  "finished_at": "2026-09-06T01:25:48+00:00",
+  "wall_clock_s": 8.7,
+  "tokens_in": 2,
+  "tokens_out": 398,
+  "cost_usd": 0.306668,
+  "verdict_text": "NO\n\nThe plan removes head 6, not head 5. The specification's Required result clauses 1 through 3 require keeping columns/rows `0..319` and `384..767` within each 768-wide segment (dropping `320..383`, which is head 5), but every copy slice in the plan keeps `0:384` and `448:768`, dropping `384..447` (head 6) instead. The same off-by-one-head error applies to all six `c_attn.weight` slices, all six `c_attn.bias` slices, and both `c_proj.weight` slices, so every layer's attention tensors hold the wrong values. The shape asserts and count assert still pass because the removed block is the same width, so the run will not fail loudly, but grading against the hidden reference will fail on values.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The removed head is off by one (head N+1 instead of head N). All shapes are still correct, so the artifact's own shape checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

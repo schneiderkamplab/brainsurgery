@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/pythia-1b/P/T4-defective.py",
+  "started_at": "2026-09-05T23:02:42+00:00",
+  "finished_at": "2026-09-05T23:02:49+00:00",
+  "wall_clock_s": 6.8,
+  "tokens_in": 2,
+  "tokens_out": 395,
+  "cost_usd": 0.09618550000000001,
+  "verdict_text": "NO\n\nThe second task vector is taken against the already-merged intermediate rather than the unmodified base. The script computes `tmp = b + \u03bb(f1\u2212b)` and then `tmp + \u03bb(f2\u2212tmp)`, which expands to `0.36\u00b7base + 0.24\u00b7ft1 + 0.40\u00b7ft2`, whereas the specification's step 2 formula `base + \u03bb(ft1\u2212base) + \u03bb(ft2\u2212base)` expands to `0.2\u00b7base + 0.4\u00b7ft1 + 0.4\u00b7ft2`. This is exactly the ordering hazard the specification calls out (\"each task vector must be taken against the unmodified base\"), so all 64 merged tensors are wrong and would fail the 1e-3 relative Frobenius check. The verification, count assertions, output tensor count, and dtype handling are otherwise correct.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "Task vector 2 is computed against the base after task vector 1 has already been added, so the second delta is taken from the wrong reference point.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

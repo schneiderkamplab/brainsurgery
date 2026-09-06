@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/P/T2-defective.py",
+  "started_at": "2026-09-05T23:16:32+00:00",
+  "finished_at": "2026-09-05T23:16:39+00:00",
+  "wall_clock_s": 6.7,
+  "tokens_in": 2,
+  "tokens_out": 338,
+  "cost_usd": 0.0990645,
+  "verdict_text": "NO\n\nThe script sets `DROP_HEAD = 6`, so it removes head 6 (rows/columns `768..895`) instead of head 5 (rows/columns `640..767`). This violates \"Required result\" clauses 1\u20134, which require keeping rows `0..639`, `768..2047` for q/k/v and the corresponding columns for `o_proj`; the artifact instead keeps `0..767`, `896..2047`. The docstring confirms the intent was head 6, so this is not a stray constant but a consistent off-by-one against the specification. The required shape checks still pass (`[1920, 2048]` and `[2048, 1920]`), so the error is silent and would only surface at grading, where bit-exact value comparison fails for all 64 head-bearing tensors. Everything else \u2014 key set, name preservation, 114-tensor single-file output \u2014 conforms.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The removed head is off by one (head N+1 instead of head N). All shapes are still correct, so the artifact's own shape checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

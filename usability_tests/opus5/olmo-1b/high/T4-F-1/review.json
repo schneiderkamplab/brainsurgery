@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/P/T4-defective.py",
+  "started_at": "2026-09-05T23:58:32+00:00",
+  "finished_at": "2026-09-05T23:58:42+00:00",
+  "wall_clock_s": 9.8,
+  "tokens_in": 2,
+  "tokens_out": 688,
+  "cost_usd": 0.1018455,
+  "verdict_text": "NO\n\nThe merge arithmetic violates required result step 2. The script computes `tmp = base + \u03bb(ft1 \u2212 base)` and then `out = tmp + \u03bb(ft2 \u2212 tmp)`, taking the second task vector against the already-merged tensor instead of against the unmodified base \u2014 exactly the ordering hazard the specification calls out. Expanding, it yields `(1\u2212\u03bb)\u00b2\u00b7base + \u03bb(1\u2212\u03bb)\u00b7ft1 + \u03bb\u00b7ft2` = `0.36\u00b7base + 0.24\u00b7ft1 + 0.4\u00b7ft2`, whereas the required formula gives `(1\u22122\u03bb)\u00b7base + \u03bb\u00b7ft1 + \u03bb\u00b7ft2` = `0.2\u00b7base + 0.4\u00b7ft1 + 0.4\u00b7ft2`, so the ft1 contribution is scaled by 0.24 rather than 0.4. That discrepancy is far above the 1e-5 relative Frobenius tolerance for the 48 merged tensors. Everything else (name-set check, non-MLP equality check, 48-merged and 114-tensor assertions, unchanged tensors copied from base, single output file) matches the specification.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "Task vector 2 is computed against the base after task vector 1 has already been added, so the second delta is taken from the wrong reference point.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

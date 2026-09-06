@@ -1,0 +1,70 @@
+# T4: Task-vector merge of two fine-tunes (Pythia-1B)
+
+## Objective
+
+Merge two fine-tunes of the same base model by task arithmetic: add a scaled
+copy of each fine-tune's change (its task vector) to the base. Both fine-tunes
+were trained with a frozen backbone, so only their MLP tensors differ from
+the base; the merge must verify that assumption before touching anything.
+
+## Why it is meaningful
+
+Task arithmetic (adding scaled task vectors of several fine-tunes to a base)
+is a widely used way to combine skills without retraining. The precondition
+matters: it only makes sense if the fine-tunes share the base everywhere
+except the tensors that were trained, so a careful merge verifies that before
+touching anything. The arithmetic hazard is ordering: each task vector must be
+taken against the unmodified base, not against a base that the first merge
+already changed. A correct solution has to check three checkpoints against
+each other, compute the merge in the right order, and leave everything else
+untouched.
+
+## Environment
+
+This task runs in its own sandbox: a fresh working directory and a fresh
+Python environment that contains only the packages of your condition. Nothing
+from other tasks, other conditions or earlier runs is available, and nothing
+you do here is visible to them. Inputs are under `inputs/` (read-only). Write
+only under `out/`. Do not leave the sandbox directory.
+
+## Inputs
+
+- `inputs/base/model.safetensors`: Pythia-1B: the base, 244 tensors, float16.
+- `inputs/ft1/model.safetensors`: fine-tune 1, same 244 names, shapes and dtypes.
+- `inputs/ft2/model.safetensors`: fine-tune 2, same layout.
+
+The MLP tensors are, per layer `i` in 0..15:
+- `gpt_neox.layers.<i>.mlp.dense_h_to_4h.weight` (`[8192, 2048]`)
+- `gpt_neox.layers.<i>.mlp.dense_h_to_4h.bias` (`[8192]`)
+- `gpt_neox.layers.<i>.mlp.dense_4h_to_h.weight` (`[2048, 8192]`)
+- `gpt_neox.layers.<i>.mlp.dense_4h_to_h.bias` (`[2048]`)
+64 tensors in total.
+
+## Required result
+
+1. Before doing anything else, verify that the three checkpoints have the
+   same tensor names and that every tensor outside the 64 MLP tensors is
+   identical in all three. Abort with an error if not.
+2. For each of the 64 MLP tensors `X`, with `lambda = 0.4`:
+
+       out[X] = base[X] + lambda * (ft1[X] - base[X]) + lambda * (ft2[X] - base[X])
+
+   computed in float32, then cast back to float16 (the base dtype); the tolerance below absorbs the rounding.
+3. Every other tensor is taken from the base unchanged. Tensor names do not
+   change.
+4. Output: a single file `out/T4/model.safetensors` with exactly 244 tensors.
+
+## Required checks
+
+Your solution must fail loudly if any of these does not hold:
+
+- the shared-tensor verification in step 1;
+- exactly 64 tensors were merged;
+- the output has exactly 244 tensors.
+
+## Grading
+
+`grade.py T4 --target pythia-1b` compares `out/T4` with a hidden reference:
+exact key set, shapes, dtypes, bit-exact values for the 180 unchanged
+tensors, and for the 64 merged tensors a relative Frobenius error of at
+most 1e-3 (so a different order of additions is fine).

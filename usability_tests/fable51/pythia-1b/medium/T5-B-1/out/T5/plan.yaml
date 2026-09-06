@@ -1,0 +1,54 @@
+# T5: merge a PEFT LoRA adapter into Pythia-1B base weights and export sharded.
+inputs:
+  - base::inputs/base/model.safetensors
+  - lora::inputs/lora/adapter_model.safetensors
+
+transforms:
+  # Sanity on the inputs: exactly 16 A / 16 B factors, 244 base tensors.
+  - assert:
+      all:
+        - count: { of: 'lora::base_model\.model\.gpt_neox\.layers\.\d+\.attention\.query_key_value\.lora_A\.weight', is: 16 }
+        - count: { of: 'lora::base_model\.model\.gpt_neox\.layers\.\d+\.attention\.query_key_value\.lora_B\.weight', is: 16 }
+        - count: { of: 'base::.*', is: 244 }
+        - shape: { of: 'base::gpt_neox.layers.0.attention.query_key_value.weight', is: [6144, 2048] }
+        - dtype: { of: 'base::gpt_neox.layers.0.attention.query_key_value.weight', is: float16 }
+
+  # delta_i = B_i @ A_i  (float32, shape [6144, 2048]), one per adapted layer.
+  - matmul:
+      from_a: 'lora::base_model\.model\.gpt_neox\.layers\.(\d+)\.attention\.query_key_value\.lora_B\.weight'
+      from_b: 'lora::base_model.model.gpt_neox.layers.\1.attention.query_key_value.lora_A.weight'
+      to: 'base::gpt_neox.layers.\1.attention.query_key_value.lora_delta'
+
+  # Exactly 16 adapter pairs were found and merged into deltas.
+  - assert:
+      all:
+        - count: { of: 'base::gpt_neox\.layers\.\d+\.attention\.query_key_value\.lora_delta', is: 16 }
+        - shape: { of: 'base::gpt_neox.layers.0.attention.query_key_value.lora_delta', is: [6144, 2048] }
+        - dtype: { of: 'base::gpt_neox.layers.0.attention.query_key_value.lora_delta', is: float32 }
+
+  # scale = lora_alpha / r = 32 / 16 = 2
+  - scale_: { target: 'base::gpt_neox\.layers\.\d+\.attention\.query_key_value\.lora_delta', by: 2.0 }
+
+  # W += scale * B @ A, computed in float32, then cast back to float16.
+  - cast_: { target: 'base::gpt_neox\.layers\.\d+\.attention\.query_key_value\.weight', to: float32 }
+  - add_:
+      from: 'base::gpt_neox\.layers\.(\d+)\.attention\.query_key_value\.lora_delta'
+      to: 'base::gpt_neox.layers.\1.attention.query_key_value.weight'
+  - cast_: { target: 'base::gpt_neox\.layers\.\d+\.attention\.query_key_value\.weight', to: float16 }
+
+  # Remove intermediates.
+  - delete: { target: 'base::gpt_neox\.layers\.\d+\.attention\.query_key_value\.lora_delta' }
+
+  # Required checks before writing.
+  - assert:
+      all:
+        - not: { exists: 'base::.*lora_.*' }
+        - shape: { of: 'base::gpt_neox.layers.0.attention.query_key_value.weight', is: [6144, 2048] }
+        - dtype: { of: 'base::gpt_neox.layers.0.attention.query_key_value.weight', is: float16 }
+        - count: { of: 'base::gpt_neox\.layers\.\d+\.attention\.query_key_value\.weight', is: 16 }
+        - count: { of: 'base::.*', is: 244 }
+
+output:
+  path: out/T5
+  format: safetensors
+  shard: 512MB

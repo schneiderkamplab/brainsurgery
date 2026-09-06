@@ -1,0 +1,105 @@
+# T4: task-vector merge of two GPT-2 fine-tunes.
+#
+#   out[X] = base[X] + lambda*(ft1[X] - base[X]) + lambda*(ft2[X] - base[X])
+#
+# for the 48 MLP tensors X (h.<i>.mlp.{c_fc,c_proj}.{weight,bias}, i in 0..11),
+# with lambda = 0.4.  Everything else is the base, untouched.
+#
+# Both task vectors are built against the *unmodified* base: tv1 and tv2 are
+# computed and scaled first, and only then added into the base tensors.
+
+inputs:
+  - base::inputs/base/model.safetensors
+  - ft1::inputs/ft1/model.safetensors
+  - ft2::inputs/ft2/model.safetensors
+
+transforms:
+  # ------------------------------------------------------------------
+  # Step 1: preconditions, checked before anything is modified.
+  # ------------------------------------------------------------------
+
+  # Each checkpoint has exactly 160 tensors, split 48 MLP / 112 non-MLP.
+  - assert: { count: { of: 'base::.*', is: 160 } }
+  - assert: { count: { of: 'ft1::.*',  is: 160 } }
+  - assert: { count: { of: 'ft2::.*',  is: 160 } }
+  - assert: { count: { of: 'base::h\.\d+\.mlp\..*', is: 48 } }
+  - assert: { count: { of: 'ft1::h\.\d+\.mlp\..*',  is: 48 } }
+  - assert: { count: { of: 'ft2::h\.\d+\.mlp\..*',  is: 48 } }
+  - assert: { count: { of: 'base::(?!h\.\d+\.mlp\.).+', is: 112 } }
+  - assert: { count: { of: 'ft1::(?!h\.\d+\.mlp\.).+',  is: 112 } }
+  - assert: { count: { of: 'ft2::(?!h\.\d+\.mlp\.).+',  is: 112 } }
+
+  # Everything is float32, so the arithmetic below is done in float32.
+  - assert: { dtype: { of: 'base::.*', is: float32 } }
+  - assert: { dtype: { of: 'ft1::.*',  is: float32 } }
+  - assert: { dtype: { of: 'ft2::.*',  is: float32 } }
+
+  # The 48 MLP tensors carry the documented names and shapes in all three
+  # checkpoints (12 layers x 4 tensors, so 12 matches per pattern).
+  - assert: { count: { of: 'base::h\.\d+\.mlp\.c_fc\.weight',  is: 12 } }
+  - assert: { count: { of: 'base::h\.\d+\.mlp\.c_fc\.bias',    is: 12 } }
+  - assert: { count: { of: 'base::h\.\d+\.mlp\.c_proj\.weight', is: 12 } }
+  - assert: { count: { of: 'base::h\.\d+\.mlp\.c_proj\.bias',   is: 12 } }
+  - assert: { shape: { of: 'base::h\.\d+\.mlp\.c_fc\.weight',  is: [768, 3072] } }
+  - assert: { shape: { of: 'base::h\.\d+\.mlp\.c_fc\.bias',    is: [3072] } }
+  - assert: { shape: { of: 'base::h\.\d+\.mlp\.c_proj\.weight', is: [3072, 768] } }
+  - assert: { shape: { of: 'base::h\.\d+\.mlp\.c_proj\.bias',   is: [768] } }
+  - assert: { shape: { of: 'ft1::h\.\d+\.mlp\.c_fc\.weight',   is: [768, 3072] } }
+  - assert: { shape: { of: 'ft1::h\.\d+\.mlp\.c_fc\.bias',     is: [3072] } }
+  - assert: { shape: { of: 'ft1::h\.\d+\.mlp\.c_proj\.weight',  is: [3072, 768] } }
+  - assert: { shape: { of: 'ft1::h\.\d+\.mlp\.c_proj\.bias',    is: [768] } }
+  - assert: { shape: { of: 'ft2::h\.\d+\.mlp\.c_fc\.weight',   is: [768, 3072] } }
+  - assert: { shape: { of: 'ft2::h\.\d+\.mlp\.c_fc\.bias',     is: [3072] } }
+  - assert: { shape: { of: 'ft2::h\.\d+\.mlp\.c_proj\.weight',  is: [3072, 768] } }
+  - assert: { shape: { of: 'ft2::h\.\d+\.mlp\.c_proj\.bias',    is: [768] } }
+
+  # Every tensor outside the 48 MLP tensors is identical in all three
+  # checkpoints.  'equal' resolves 'right' by rewriting each 'left' match, so
+  # this also proves the 112 non-MLP names exist under the same name in the
+  # other checkpoint (and match in shape and dtype).  No eps: bit-exact.
+  - assert: { equal: { left: 'ft1::(?!h\.\d+\.mlp\.).+', right: 'base::\g<0>' } }
+  - assert: { equal: { left: 'ft2::(?!h\.\d+\.mlp\.).+', right: 'base::\g<0>' } }
+
+  # ------------------------------------------------------------------
+  # Step 2: task vectors, both taken against the unmodified base.
+  # ------------------------------------------------------------------
+
+  # tv1 = lambda * (ft1 - base)
+  - copy:      { from: 'ft1::(h\.\d+\.mlp\..*)',  to: 'base::tv1.\1' }
+  - subtract_: { from: 'base::(h\.\d+\.mlp\..*)', to: 'base::tv1.\1' }
+  - scale_:    { target: 'base::tv1\..*', by: 0.4 }
+
+  # tv2 = lambda * (ft2 - base); base is still unmodified here.
+  - copy:      { from: 'ft2::(h\.\d+\.mlp\..*)',  to: 'base::tv2.\1' }
+  - subtract_: { from: 'base::(h\.\d+\.mlp\..*)', to: 'base::tv2.\1' }
+  - scale_:    { target: 'base::tv2\..*', by: 0.4 }
+
+  # Required check: exactly 48 tensors take part in the merge.
+  - assert: { count: { of: 'base::tv1\..*', is: 48 } }
+  - assert: { count: { of: 'base::tv2\..*', is: 48 } }
+
+  # base <- base + tv1 + tv2, only on the 48 MLP tensors.
+  - add_: { from: 'base::tv1\.(h\.\d+\.mlp\..*)', to: 'base::\1' }
+  - add_: { from: 'base::tv2\.(h\.\d+\.mlp\..*)', to: 'base::\1' }
+
+  # ------------------------------------------------------------------
+  # Step 3: drop the scratch tensors and check the result.
+  # ------------------------------------------------------------------
+  - delete: { target: 'base::tv1\..*' }
+  - delete: { target: 'base::tv2\..*' }
+
+  # Required check: the output has exactly 160 tensors, 48 of them MLP.
+  - assert: { count: { of: 'base::.*', is: 160 } }
+  - assert: { count: { of: 'base::h\.\d+\.mlp\..*', is: 48 } }
+  - assert: { count: { of: 'base::(?!h\.\d+\.mlp\.).+', is: 112 } }
+
+  # The 112 non-MLP tensors are still bit-identical to the base (ft1 was shown
+  # to equal the base on exactly those tensors in step 1).
+  - assert: { equal: { left: 'base::(?!h\.\d+\.mlp\.).+', right: 'ft1::\g<0>' } }
+
+  # The 48 MLP tensors did change (lambda != 0 and the fine-tunes differ).
+  - assert: { not: { equal: { left: 'base::(h\.\d+\.mlp\..*)', right: 'ft1::\1' } } }
+
+output:
+  path: out/T4/model.safetensors
+  format: safetensors

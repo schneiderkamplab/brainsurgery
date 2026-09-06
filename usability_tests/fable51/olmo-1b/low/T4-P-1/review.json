@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/P/T4-defective.py",
+  "started_at": "2026-09-06T00:35:26+00:00",
+  "finished_at": "2026-09-06T00:35:33+00:00",
+  "wall_clock_s": 6.3,
+  "tokens_in": 2,
+  "tokens_out": 267,
+  "cost_usd": 0.17631500000000003,
+  "verdict_text": "NO\n\nThe second task vector is taken against the already-merged tensor instead of the unmodified base: the script computes `tmp + LAMBDA * (f2 - tmp)` where `tmp = b + LAMBDA * (f1 - b)`, so the ft2 delta is `f2 - tmp` rather than `f2 - b`. This expands to `b + 0.4*(f1-b) + 0.4*(f2-b) - 0.16*(f1-b)`, which differs from the required formula whenever ft1 changed the tensor. It violates Required result step 2 (and the ordering hazard called out in the objective), and the merged tensors will not meet the 1e-5 relative Frobenius tolerance. The shared-tensor verification, merge count, output count and untouched-tensor handling are otherwise correct.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "Task vector 2 is computed against the base after task vector 1 has already been added, so the second delta is taken from the wrong reference point.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

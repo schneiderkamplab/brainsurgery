@@ -1,0 +1,26 @@
+inputs:
+  - model::inputs/base/model.safetensors
+
+transforms:
+  # 1. Remove every tensor of the three dropped blocks.
+  - delete: { target: '^h\.(2|5|8)\..*$' }
+
+  # 2. Renumber survivors in original order, low index first, so each
+  #    destination slot is vacated (deleted or already moved out of) before
+  #    it is written to. No slot is ever overwritten while still live.
+  - move: { from: '^h\.3\.(.*)$', to: 'h.2.\1' }
+  - move: { from: '^h\.4\.(.*)$', to: 'h.3.\1' }
+  - move: { from: '^h\.6\.(.*)$', to: 'h.4.\1' }
+  - move: { from: '^h\.7\.(.*)$', to: 'h.5.\1' }
+  - move: { from: '^h\.9\.(.*)$', to: 'h.6.\1' }
+  - move: { from: '^h\.10\.(.*)$', to: 'h.7.\1' }
+  - move: { from: '^h\.11\.(.*)$', to: 'h.8.\1' }
+
+  # Required checks.
+  - assert: { not: { exists: '^h\.(9|10|11)\..*$' } }
+  - assert: { count: { of: '^h\.\d+\.attn\.c_attn\.weight$', is: 9 } }
+  - assert: { count: { of: '.*', is: 121 } }
+
+output:
+  path: out/T1/model.safetensors
+  format: safetensors

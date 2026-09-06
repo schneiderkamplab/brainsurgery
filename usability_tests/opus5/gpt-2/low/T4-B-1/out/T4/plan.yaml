@@ -1,0 +1,47 @@
+# T4: task-vector merge of two GPT-2 fine-tunes, lambda = 0.4
+#   out[X] = base[X] + 0.4*(ft1[X]-base[X]) + 0.4*(ft2[X]-base[X])
+#          = 0.2*base[X] + 0.4*ft1[X] + 0.4*ft2[X]
+# The scaled copies of ft1/ft2 are taken before base is touched, so both task
+# vectors are measured against the unmodified base.
+inputs:
+  - base::inputs/base/model.safetensors
+  - ft1::inputs/ft1/model.safetensors
+  - ft2::inputs/ft2/model.safetensors
+
+transforms:
+  # --- step 1: preconditions -------------------------------------------------
+  # same number of tensors in all three checkpoints
+  - assert: { count: { of: 'base::.+', is: 160 } }
+  - assert: { count: { of: 'ft1::.+', is: 160 } }
+  - assert: { count: { of: 'ft2::.+', is: 160 } }
+  # the 48 MLP tensors exist under the same names in all three
+  - assert: { count: { of: 'base::h\.\d+\.mlp\.c_(fc|proj)\.(weight|bias)', is: 48 } }
+  - assert: { count: { of: 'ft1::h\.\d+\.mlp\.c_(fc|proj)\.(weight|bias)', is: 48 } }
+  - assert: { count: { of: 'ft2::h\.\d+\.mlp\.c_(fc|proj)\.(weight|bias)', is: 48 } }
+  # every tensor outside the MLPs exists under the same name and is identical
+  - assert: { count: { of: 'base::(?!h\.\d+\.mlp\.).+', is: 112 } }
+  - assert: { equal: { left: 'base::(?!h\.\d+\.mlp\.).+', right: 'ft1::\g<0>' } }
+  - assert: { equal: { left: 'base::(?!h\.\d+\.mlp\.).+', right: 'ft2::\g<0>' } }
+
+  # --- step 2: scaled fine-tune contributions (staged on the base alias) ------
+  - scale: { from: 'ft1::(h\.\d+\.mlp\..+)', to: 'base::tv1.\1', by: 0.4 }
+  - scale: { from: 'ft2::(h\.\d+\.mlp\..+)', to: 'base::tv2.\1', by: 0.4 }
+  - assert: { count: { of: 'base::tv1\.h\.\d+\.mlp\..+', is: 48 } }
+  - assert: { count: { of: 'base::tv2\.h\.\d+\.mlp\..+', is: 48 } }
+
+  # --- step 3: merge ---------------------------------------------------------
+  # base <- (1 - 2*lambda) * base
+  - scale_: { target: 'base::h\.\d+\.mlp\..+', by: 0.2 }
+  - add_: { from: 'base::tv1\.(h\.\d+\.mlp\..+)', to: 'base::\1' }
+  - add_: { from: 'base::tv2\.(h\.\d+\.mlp\..+)', to: 'base::\1' }
+
+  # --- step 4: drop scratch tensors and check the result ---------------------
+  - delete: { target: 'base::tv[12]\..+' }
+  - assert: { count: { of: 'base::h\.\d+\.mlp\.c_(fc|proj)\.(weight|bias)', is: 48 } }
+  - assert: { count: { of: 'base::.+', is: 160 } }
+  # unchanged tensors are still bit-identical to the (untouched) fine-tunes
+  - assert: { equal: { left: 'base::(?!h\.\d+\.mlp\.).+', right: 'ft1::\g<0>' } }
+
+output:
+  path: out/T4/model.safetensors
+  format: safetensors

@@ -1,0 +1,104 @@
+transforms:
+- assert:
+    all:
+    - count:
+        of: base::.*
+        is: 160
+    - count:
+        of: ft1::.*
+        is: 160
+    - count:
+        of: ft2::.*
+        is: 160
+    - count:
+        of: base::h\.\d+\.mlp\.(c_fc|c_proj)\.(weight|bias)
+        is: 48
+    - count:
+        of: ft1::h\.\d+\.mlp\.(c_fc|c_proj)\.(weight|bias)
+        is: 48
+    - count:
+        of: ft2::h\.\d+\.mlp\.(c_fc|c_proj)\.(weight|bias)
+        is: 48
+- assert:
+    equal:
+      left: base::(?!h\.\d+\.mlp\.).+
+      right: ft1::\g<0>
+- assert:
+    equal:
+      left: base::(?!h\.\d+\.mlp\.).+
+      right: ft2::\g<0>
+- assert:
+    equal:
+      left: ft1::h\.\d+\.mlp\.(c_fc|c_proj)\.(weight|bias)
+      right: base::\g<0>
+      eps: 1.0e+30
+- assert:
+    equal:
+      left: ft2::h\.\d+\.mlp\.(c_fc|c_proj)\.(weight|bias)
+      right: base::\g<0>
+      eps: 1.0e+30
+- assert:
+    all:
+    - dtype:
+        of: base::h\.\d+\.mlp\.(c_fc|c_proj)\.(weight|bias)
+        is: float32
+    - dtype:
+        of: ft1::h\.\d+\.mlp\.(c_fc|c_proj)\.(weight|bias)
+        is: float32
+    - dtype:
+        of: ft2::h\.\d+\.mlp\.(c_fc|c_proj)\.(weight|bias)
+        is: float32
+- copy:
+    from: ft1::(h\.\d+\.mlp\.(?:c_fc|c_proj)\.(?:weight|bias))
+    to: base::tv1.\1
+- copy:
+    from: ft2::(h\.\d+\.mlp\.(?:c_fc|c_proj)\.(?:weight|bias))
+    to: base::tv2.\1
+- subtract_:
+    from: base::(h\.\d+\.mlp\.(?:c_fc|c_proj)\.(?:weight|bias))
+    to: base::tv1.\1
+- subtract_:
+    from: base::(h\.\d+\.mlp\.(?:c_fc|c_proj)\.(?:weight|bias))
+    to: base::tv2.\1
+- scale_:
+    target: base::tv1\..+
+    by: 0.4
+- scale_:
+    target: base::tv2\..+
+    by: 0.4
+- assert:
+    all:
+    - count:
+        of: base::tv1\..+
+        is: 48
+    - count:
+        of: base::tv2\..+
+        is: 48
+    - count:
+        of: base::.*
+        is: 256
+- add_:
+    from: base::tv1\.(h\.\d+\.mlp\.(?:c_fc|c_proj)\.(?:weight|bias))
+    to: base::\1
+- add_:
+    from: base::tv2\.(h\.\d+\.mlp\.(?:c_fc|c_proj)\.(?:weight|bias))
+    to: base::\1
+- delete:
+    target: base::tv[12]\..+
+- assert:
+    all:
+    - count:
+        of: base::.*
+        is: 160
+    - count:
+        of: base::h\.\d+\.mlp\.(c_fc|c_proj)\.(weight|bias)
+        is: 48
+    - not:
+        exists: base::tv.*
+    - dtype:
+        of: base::h\.\d+\.mlp\.(c_fc|c_proj)\.(weight|bias)
+        is: float32
+- assert:
+    equal:
+      left: base::(?!h\.\d+\.mlp\.).+
+      right: ft1::\g<0>

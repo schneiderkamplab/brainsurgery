@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/P/T4-defective.py",
+  "started_at": "2026-09-05T21:45:09+00:00",
+  "finished_at": "2026-09-05T21:45:14+00:00",
+  "wall_clock_s": 5.2,
+  "tokens_in": 2,
+  "tokens_out": 197,
+  "cost_usd": 0.0369268,
+  "verdict_text": "NO\n\nThe merge computes `out = base + \u03bb(ft1-base)` then applies the second lambda against that intermediate result (`tmp + \u03bb(ft2-tmp)`) rather than against the unmodified base, i.e. `tmp + \u03bb(ft2-tmp) = (1-\u03bb)\u00b7tmp + \u03bb\u00b7ft2 \u2260 base + \u03bb(ft1-base) + \u03bb(ft2-base)`. This violates Required result clause 2's specified formula and the \"Why it is meaningful\" ordering requirement that each task vector be taken against the unmodified base, not a base already modified by the first merge.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "Task vector 2 is computed against the base after task vector 1 has already been added, so the second delta is taken from the wrong reference point.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

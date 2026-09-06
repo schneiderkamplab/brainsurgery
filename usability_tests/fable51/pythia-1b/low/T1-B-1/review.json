@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/pythia-1b/B/T1-defective.yaml",
+  "started_at": "2026-09-06T00:40:18+00:00",
+  "finished_at": "2026-09-06T00:40:24+00:00",
+  "wall_clock_s": 6.3,
+  "tokens_in": 2,
+  "tokens_out": 216,
+  "cost_usd": 0.19824,
+  "verdict_text": "NO\n\nThe plan deletes blocks 2, 6, 10 and 15 instead of the required 2, 6, 10 and 14, violating Required result clause 1. As a consequence, old block 14 is renumbered to 11 and old block 15 is discarded, so the surviving block set and mapping (which requires old 15 to become 11) violate clause 2. The checks pass by construction (60 deleted tensors, no blocks 12 through 15, 12 blocks, 184 tensors), so the error would not be caught by the plan's asserts. Grading against the hidden reference would fail on values, since block 11 holds old block 14's weights rather than old block 15's.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The drop set is off by one: the last dropped block is the one after the specified block (for example blocks 2, 5, 9 instead of 2, 5, 8). Block counts still match, so the artifact's own checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

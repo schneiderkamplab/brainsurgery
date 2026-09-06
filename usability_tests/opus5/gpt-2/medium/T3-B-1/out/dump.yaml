@@ -1,0 +1,4 @@
+inputs:
+  - model::inputs/base/model.safetensors
+transforms:
+  - dump: { target: ".*", format: compact }

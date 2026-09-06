@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/P/T1-defective.py",
+  "started_at": "2026-09-06T01:52:58+00:00",
+  "finished_at": "2026-09-06T01:53:05+00:00",
+  "wall_clock_s": 7.1,
+  "tokens_in": 2,
+  "tokens_out": 340,
+  "cost_usd": 0.185395,
+  "verdict_text": "NO\n\nThe script drops blocks {2, 5, 9}, but Required result clause 1 says to remove blocks 2, 5, 8. As a result old block 8 survives and old block 9 is deleted, so the renumbering also differs from clause 2 (old 8 becomes 6 instead of old 9 becoming 6, with 10 and 11 following). The output still has 121 tensors and contiguous indices 0..8, so the script's own assertions pass, but the key-to-value mapping will not match the hidden reference in grading.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The drop set is off by one: the last dropped block is the one after the specified block (for example blocks 2, 5, 9 instead of 2, 5, 8). Block counts still match, so the artifact's own checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

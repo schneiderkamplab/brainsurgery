@@ -1,0 +1,28 @@
+inputs:
+  - model::inputs/base/model.safetensors
+
+transforms:
+  # Delete all tensors belonging to the four dropped blocks.
+  - delete: { target: 'gpt_neox\.layers\.(2|6|10|14)\..*' }
+
+  # Renumber survivors, in ascending old-index order, so a destination index
+  # is always either already deleted or already vacated by an earlier move.
+  - move: { from: ['gpt_neox', 'layers', '3', '*rest'], to: ['gpt_neox', 'layers', '2', '*rest'] }
+  - move: { from: ['gpt_neox', 'layers', '4', '*rest'], to: ['gpt_neox', 'layers', '3', '*rest'] }
+  - move: { from: ['gpt_neox', 'layers', '5', '*rest'], to: ['gpt_neox', 'layers', '4', '*rest'] }
+  - move: { from: ['gpt_neox', 'layers', '7', '*rest'], to: ['gpt_neox', 'layers', '5', '*rest'] }
+  - move: { from: ['gpt_neox', 'layers', '8', '*rest'], to: ['gpt_neox', 'layers', '6', '*rest'] }
+  - move: { from: ['gpt_neox', 'layers', '9', '*rest'], to: ['gpt_neox', 'layers', '7', '*rest'] }
+  - move: { from: ['gpt_neox', 'layers', '11', '*rest'], to: ['gpt_neox', 'layers', '8', '*rest'] }
+  - move: { from: ['gpt_neox', 'layers', '12', '*rest'], to: ['gpt_neox', 'layers', '9', '*rest'] }
+  - move: { from: ['gpt_neox', 'layers', '13', '*rest'], to: ['gpt_neox', 'layers', '10', '*rest'] }
+  - move: { from: ['gpt_neox', 'layers', '15', '*rest'], to: ['gpt_neox', 'layers', '11', '*rest'] }
+
+  # Required checks: fail loudly if any of these do not hold.
+  - assert: { not: { exists: 'gpt_neox\.layers\.(12|13|14|15)\..*' } }
+  - assert: { count: { of: 'gpt_neox\.layers\.\d+\.attention\.query_key_value\.weight', is: 12 } }
+  - assert: { count: { of: '.*', is: 184 } }
+
+output:
+  path: out/T1/model.safetensors
+  format: safetensors

@@ -1,0 +1,65 @@
+# T3: mixed-precision export with sharding (OLMo-1B-0724-hf)
+#
+# Cast exactly the 112 projection matrices to bfloat16, leave every other
+# tensor untouched float32, keep all names, and write a sharded safetensors
+# checkpoint with a 256 MiB shard budget.
+
+inputs:
+  - model::inputs/base
+
+output:
+  path: out/T3
+  format: safetensors
+  shard: 256MB          # 256 * 1024 * 1024 = 268,435,456 bytes of tensor data
+
+transforms:
+
+  # ---- preflight -------------------------------------------------------
+  # The checkpoint is the expected one: 114 tensors, all float32.
+  - assert: { count: { of: 'model::.*', is: 114 } }
+  - assert: { dtype: { of: 'model::.*', is: float32 } }
+
+  # The projection pattern selects exactly the 112 intended matrices and
+  # nothing else (no embeddings, no norms, no biases, no buffers).
+  - assert:
+      count:
+        of: 'model::model\.layers\.\d+\.(?:self_attn\.[qkvo]_proj|mlp\.(?:gate|up|down)_proj)\.weight'
+        is: 112
+  - assert:
+      shape: { of: 'model::model\.layers\.0\.self_attn\.q_proj\.weight', is: [2048, 2048] }
+  - assert:
+      shape: { of: 'model::model\.layers\.0\.mlp\.gate_proj\.weight', is: [8192, 2048] }
+  - assert:
+      shape: { of: 'model::model\.layers\.0\.mlp\.down_proj\.weight', is: [2048, 8192] }
+
+  # ---- the edit --------------------------------------------------------
+  # In-place cast keeps the tensor names and the state-dict order unchanged.
+  - cast_:
+      target: 'model::model\.layers\.\d+\.(?:self_attn\.[qkvo]_proj|mlp\.(?:gate|up|down)_proj)\.weight'
+      to: bfloat16
+
+  # ---- required checks (fail loudly before writing) --------------------
+  # exactly 112 tensors are bfloat16: the 112 projections are bfloat16 ...
+  - assert:
+      count:
+        of: 'model::model\.layers\.\d+\.(?:self_attn\.[qkvo]_proj|mlp\.(?:gate|up|down)_proj)\.weight'
+        is: 112
+  - assert:
+      dtype:
+        of: 'model::model\.layers\.\d+\.(?:self_attn\.[qkvo]_proj|mlp\.(?:gate|up|down)_proj)\.weight'
+        is: bfloat16
+  # ... and every tensor that is not a projection is still float32.
+  - assert:
+      dtype:
+        of: 'model::(?!model\.layers\.\d+\.(?:self_attn\.[qkvo]_proj|mlp\.(?:gate|up|down)_proj)\.weight$).*'
+        is: float32
+
+  # named spot checks from the task
+  - assert: { dtype: { of: 'model::model\.layers\.0\.self_attn\.q_proj\.weight', is: bfloat16 } }
+  - assert: { dtype: { of: 'model::model\.embed_tokens\.weight', is: float32 } }
+  - assert: { dtype: { of: 'model::lm_head\.weight', is: float32 } }
+
+  # nothing was added, deleted or renamed: still 114 tensors.
+  - assert: { count: { of: 'model::.*', is: 114 } }
+  - assert: { exists: 'model::model\.embed_tokens\.weight' }
+  - assert: { exists: 'model::lm_head\.weight' }

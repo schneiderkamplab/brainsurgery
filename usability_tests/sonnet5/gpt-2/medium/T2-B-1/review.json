@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/B/T2-defective.yaml",
+  "started_at": "2026-09-05T21:36:42+00:00",
+  "finished_at": "2026-09-05T21:36:47+00:00",
+  "wall_clock_s": 5.7,
+  "tokens_in": 2,
+  "tokens_out": 230,
+  "cost_usd": 0.0659328,
+  "verdict_text": "NO\n\nThe artifact removes head 6 (columns/rows 384..447) instead of head 5 (columns/rows 320..383) as required by \"Required result\" clause: \"remove head 5\" with keep-ranges `0..319, 384..767, ...`. The plan's slices (`0:384`, `448:768`, and the analogous c_proj slices `0:384`, `448:768`) correspond to dropping the block `384:448`, i.e., head index 6, not `320:384` (head 5). This produces the correct output shapes (matching the required checks) but wrong values/content, violating clause 1\u20133 of \"Required result\" (wrong columns/rows kept) even though it would pass the shape-only \"Required checks.\"",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The removed head is off by one (head N+1 instead of head N). All shapes are still correct, so the artifact's own shape checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

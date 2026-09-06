@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/B/T2-defective.yaml",
+  "started_at": "2026-09-06T01:34:31+00:00",
+  "finished_at": "2026-09-06T01:34:38+00:00",
+  "wall_clock_s": 7.0,
+  "tokens_in": 2,
+  "tokens_out": 311,
+  "cost_usd": 0.323867,
+  "verdict_text": "NO\n\nThe plan removes head 6, not head 5. Its copy transforms keep rows `0:768` and `896:2048` for the query, key and value projections and columns `0:768` and `896:2048` for the output projection, whereas the specification's \"Required result\" clauses 1 through 4 require keeping rows or columns `0..639` and `768..2047`, dropping the block `640..767`. The resulting shapes are still `[1920, 2048]` and `[2048, 1920]`, so the shape and count asserts pass, but the values differ from the hidden reference and the bit-exact grading will fail. The plan's own header comment confirms the wrong head: \"remove attention head 6 from every layer.\"",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The removed head is off by one (head N+1 instead of head N). All shapes are still correct, so the artifact's own shape checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

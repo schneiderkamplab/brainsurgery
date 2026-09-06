@@ -1,0 +1,56 @@
+# T1: depth pruning of Pythia-1B (16 -> 12 blocks).
+# Drop blocks 2, 6, 10, 14; renumber the survivors in ascending order so no
+# move ever lands on a slot that is still occupied.
+
+inputs:
+  - model::inputs/base/model.safetensors
+
+transforms:
+  # Sanity: the input really is the 16-layer, 244-tensor checkpoint.
+  - assert:
+      all:
+        - count: { of: '.*', is: 244 }
+        - count: { of: 'gpt_neox\.layers\.\d+\.attention\.query_key_value\.weight', is: 16 }
+
+  # 1. Remove every tensor of the pruned blocks.
+  - delete: { target: 'gpt_neox\.layers\.(2|6|10|14)\..*' }
+  - assert:
+      all:
+        - count: { of: '.*', is: 184 }
+        - count: { of: 'gpt_neox\.layers\.\d+\.attention\.query_key_value\.weight', is: 12 }
+
+  # 2. Renumber, lowest target index first: each destination slot is already
+  #    free when it is written (2 was deleted, 3 was vacated by 3->2, ...).
+  - move: { from: 'gpt_neox\.layers\.3\.(.*)',  to: 'gpt_neox.layers.2.\1' }
+  - move: { from: 'gpt_neox\.layers\.4\.(.*)',  to: 'gpt_neox.layers.3.\1' }
+  - move: { from: 'gpt_neox\.layers\.5\.(.*)',  to: 'gpt_neox.layers.4.\1' }
+  - move: { from: 'gpt_neox\.layers\.7\.(.*)',  to: 'gpt_neox.layers.5.\1' }
+  - move: { from: 'gpt_neox\.layers\.8\.(.*)',  to: 'gpt_neox.layers.6.\1' }
+  - move: { from: 'gpt_neox\.layers\.9\.(.*)',  to: 'gpt_neox.layers.7.\1' }
+  - move: { from: 'gpt_neox\.layers\.11\.(.*)', to: 'gpt_neox.layers.8.\1' }
+  - move: { from: 'gpt_neox\.layers\.12\.(.*)', to: 'gpt_neox.layers.9.\1' }
+  - move: { from: 'gpt_neox\.layers\.13\.(.*)', to: 'gpt_neox.layers.10.\1' }
+  - move: { from: 'gpt_neox\.layers\.15\.(.*)', to: 'gpt_neox.layers.11.\1' }
+
+  # 3. Required checks.
+  - assert:
+      all:
+        # No tensor of blocks 12..15 remains.
+        - not: { exists: 'gpt_neox\.layers\.(12|13|14|15)\..*' }
+        # Exactly 12 blocks remain, and they are contiguous 0..11.
+        - count: { of: 'gpt_neox\.layers\.\d+\.attention\.query_key_value\.weight', is: 12 }
+        - count: { of: 'gpt_neox\.layers\.([0-9]|1[01])\.attention\.query_key_value\.weight', is: 12 }
+        # Every block still owns its full set of 15 tensors.
+        - count: { of: 'gpt_neox\.layers\.\d+\..*', is: 180 }
+        # The 4 non-block tensors are untouched.
+        - count: { of: '(?!gpt_neox\.layers\.).*', is: 4 }
+        - exists: 'gpt_neox\.embed_in\.weight'
+        - exists: 'embed_out\.weight'
+        - exists: 'gpt_neox\.final_layer_norm\.weight'
+        - exists: 'gpt_neox\.final_layer_norm\.bias'
+        # The output has exactly 184 tensors.
+        - count: { of: '.*', is: 184 }
+
+output:
+  path: out/T1/model.safetensors
+  format: safetensors

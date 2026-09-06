@@ -1,0 +1,13 @@
+{
+  "task": "T4",
+  "passed": true,
+  "findings": [],
+  "metrics": {
+    "target": "gpt-2",
+    "tensors_expected": 160,
+    "tensors_found": 160,
+    "max_rel_error_tolerant": 6.900820619535687e-08,
+    "shape_dtype_mismatches": 0,
+    "value_mismatches": 0
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/pythia-1b/P/T1-defective.py",
+  "started_at": "2026-09-06T00:38:52+00:00",
+  "finished_at": "2026-09-06T00:39:00+00:00",
+  "wall_clock_s": 8.2,
+  "tokens_in": 2,
+  "tokens_out": 247,
+  "cost_usd": 0.191756,
+  "verdict_text": "NO\n\nThe script drops blocks {2, 6, 10, 15} instead of the specified {2, 6, 10, 14}, violating \"Required result\" clause 1. As a consequence the renumbering also violates clause 2: old 14 is kept and mapped to new 11, while old 15 is deleted, whereas the spec requires old 15 to become 11 and old 14 to be removed. The result still has 184 tensors and 12 contiguous blocks, so the script's own asserts pass and the error is silent, exactly the hazard the task describes. The \"Required checks\" are also incomplete: there is no explicit check that no tensor of blocks 12 to 15 remains and no explicit count of query_key_value weights, though the contiguity assert covers those indirectly.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The drop set is off by one: the last dropped block is the one after the specified block (for example blocks 2, 5, 9 instead of 2, 5, 8). Block counts still match, so the artifact's own checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

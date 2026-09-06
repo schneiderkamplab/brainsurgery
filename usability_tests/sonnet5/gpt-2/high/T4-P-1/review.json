@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/P/T4-defective.py",
+  "started_at": "2026-09-05T22:05:53+00:00",
+  "finished_at": "2026-09-05T22:06:04+00:00",
+  "wall_clock_s": 11.2,
+  "tokens_in": 2,
+  "tokens_out": 1010,
+  "cost_usd": 0.0448918,
+  "verdict_text": "NO\n\nThe formula in \"Required result\" step 2 requires `out = base + \u03bb(ft1-base) + \u03bb(ft2-base)`, i.e. each task vector must be computed relative to the *unmodified* base. The script instead does `tmp = base + \u03bb(ft1-base)` then `out = tmp + \u03bb(ft2-tmp)`, taking ft2's task vector against `tmp` (the already-ft1-merged base) rather than against `base`. Algebraically this yields `(1-\u03bb)\u00b2\u00b7base + \u03bb(1-\u03bb)\u00b7ft1 + \u03bb\u00b7ft2`, not `(1-2\u03bb)\u00b7base + \u03bb\u00b7ft1 + \u03bb\u00b7ft2` \u2014 for \u03bb=0.4 the base coefficient is 0.36 vs. required 0.2 and the ft1 coefficient is 0.24 vs. required 0.4, well outside the 1e-5 relative-Frobenius tolerance. This is exactly the ordering hazard the spec calls out: \"each task vector must be taken against the unmodified base, not against a base that the first merge already changed,\" and it will fail grading on all 48 merged tensors.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "Task vector 2 is computed against the base after task vector 1 has already been added, so the second delta is taken from the wrong reference point.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

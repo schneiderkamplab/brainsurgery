@@ -1,0 +1,80 @@
+# T4: task-vector merge of two frozen-backbone fine-tunes into the base.
+#   out[X] = base[X] + 0.4*(ft1[X] - base[X]) + 0.4*(ft2[X] - base[X])   for the 48 MLP tensors
+# Every write goes to the `base` alias, so `base` is the output model.
+
+inputs:
+  - base::inputs/base
+  - ft1::inputs/ft1/model.safetensors
+  - ft2::inputs/ft2/model.safetensors
+
+output:
+  path: out/T4/model.safetensors
+  format: safetensors
+
+transforms:
+  # ---- Step 1: precondition checks, before touching anything -------------
+  # Same tensor count in all three checkpoints.
+  - assert: { count: { of: 'base::.+', is: 114 } }
+  - assert: { count: { of: 'ft1::.+',  is: 114 } }
+  - assert: { count: { of: 'ft2::.+',  is: 114 } }
+  # Exactly 48 MLP tensors in each checkpoint (16 layers x gate/up/down).
+  - assert: { count: { of: 'base::model\.layers\.\d+\.mlp\.(gate_proj|up_proj|down_proj)\.weight', is: 48 } }
+  - assert: { count: { of: 'ft1::model\.layers\.\d+\.mlp\.(gate_proj|up_proj|down_proj)\.weight',  is: 48 } }
+  - assert: { count: { of: 'ft2::model\.layers\.\d+\.mlp\.(gate_proj|up_proj|down_proj)\.weight',  is: 48 } }
+  # The 66 non-MLP tensors exist under the same name in ft1 and ft2 and are
+  # bit-identical to the base (equal: same shape, dtype, values; no eps).
+  # Together with the counts above this proves the three name sets coincide.
+  - assert: { count: { of: 'base::(?!model\.layers\.\d+\.mlp\.(?:gate_proj|up_proj|down_proj)\.weight$).+', is: 66 } }
+  - assert:
+      equal:
+        left:  'base::(?!model\.layers\.\d+\.mlp\.(?:gate_proj|up_proj|down_proj)\.weight$).+'
+        right: 'ft1::\g<0>'
+  - assert:
+      equal:
+        left:  'base::(?!model\.layers\.\d+\.mlp\.(?:gate_proj|up_proj|down_proj)\.weight$).+'
+        right: 'ft2::\g<0>'
+  # Merged tensors must be float32 (the arithmetic is done in that dtype).
+  - assert: { dtype: { of: 'base::model\.layers\.\d+\.mlp\.(gate_proj|up_proj|down_proj)\.weight', is: float32 } }
+
+  # ---- Step 2: task vectors against the UNMODIFIED base ------------------
+  # tv1 = ft1 - base, tv2 = ft2 - base, both computed before base is edited.
+  - copy:
+      from: 'ft1::model\.layers\.(\d+)\.mlp\.(gate_proj|up_proj|down_proj)\.weight'
+      to:   'base::tv1.\1.\2'
+  - subtract_:
+      from: 'base::model\.layers\.(\d+)\.mlp\.(gate_proj|up_proj|down_proj)\.weight'
+      to:   'base::tv1.\1.\2'
+  - copy:
+      from: 'ft2::model\.layers\.(\d+)\.mlp\.(gate_proj|up_proj|down_proj)\.weight'
+      to:   'base::tv2.\1.\2'
+  - subtract_:
+      from: 'base::model\.layers\.(\d+)\.mlp\.(gate_proj|up_proj|down_proj)\.weight'
+      to:   'base::tv2.\1.\2'
+  # Exactly 48 task-vector tensors per fine-tune were produced.
+  - assert: { count: { of: 'base::tv1\.\d+\.(gate_proj|up_proj|down_proj)', is: 48 } }
+  - assert: { count: { of: 'base::tv2\.\d+\.(gate_proj|up_proj|down_proj)', is: 48 } }
+
+  # lambda = 0.4 for both task vectors.
+  - scale_: { target: 'base::tv[12]\.\d+\.(gate_proj|up_proj|down_proj)', by: 0.4 }
+
+  # ---- Step 3: merge into base: base += 0.4*tv1; base += 0.4*tv2 ---------
+  - add_:
+      from: 'base::tv1\.(\d+)\.(gate_proj|up_proj|down_proj)'
+      to:   'base::model.layers.\1.mlp.\2.weight'
+  - add_:
+      from: 'base::tv2\.(\d+)\.(gate_proj|up_proj|down_proj)'
+      to:   'base::model.layers.\1.mlp.\2.weight'
+
+  # Drop the temporaries so only the 114 original names remain.
+  - delete: { target: 'base::tv[12]\.\d+\.(gate_proj|up_proj|down_proj)' }
+
+  # ---- Final checks ------------------------------------------------------
+  - assert: { not: { exists: 'base::tv[12]\..*' } }
+  - assert: { count: { of: 'base::model\.layers\.\d+\.mlp\.(gate_proj|up_proj|down_proj)\.weight', is: 48 } }
+  - assert: { count: { of: 'base::.+', is: 114 } }
+  - assert: { dtype: { of: 'base::model\.layers\.\d+\.mlp\.(gate_proj|up_proj|down_proj)\.weight', is: float32 } }
+  # Non-MLP tensors are still bit-identical to ft1 (i.e. untouched base).
+  - assert:
+      equal:
+        left:  'base::(?!model\.layers\.\d+\.mlp\.(?:gate_proj|up_proj|down_proj)\.weight$).+'
+        right: 'ft1::\g<0>'

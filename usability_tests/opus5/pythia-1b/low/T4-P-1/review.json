@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/pythia-1b/P/T4-defective.py",
+  "started_at": "2026-09-05T23:01:49+00:00",
+  "finished_at": "2026-09-05T23:01:57+00:00",
+  "wall_clock_s": 8.1,
+  "tokens_in": 2,
+  "tokens_out": 482,
+  "cost_usd": 0.0972905,
+  "verdict_text": "NO\n\nThe second task vector is taken against the already-merged intermediate, not against the unmodified base: `tmp = b + \u03bb(f1-b)` then `out = tmp + \u03bb(f2 - tmp)`, which equals `base + \u03bb(ft1-base) + \u03bb(ft2-base) - \u03bb\u00b2(ft1-base)` rather than the formula in \"Required result\" clause 2. This is precisely the ordering hazard the specification calls out (\"each task vector must be taken against the unmodified base\"), and it introduces a systematic `0.16 * (ft1 - base)` error on all 64 merged tensors. Everything else (name-set check, shared-tensor bit-equality, merged==64, len==244, float32 compute with cast back to float16, single output file) matches the specification.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "Task vector 2 is computed against the base after task vector 1 has already been added, so the second delta is taken from the wrong reference point.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

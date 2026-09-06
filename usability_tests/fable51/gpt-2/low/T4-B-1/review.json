@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/B/T4-defective.yaml",
+  "started_at": "2026-09-06T00:29:55+00:00",
+  "finished_at": "2026-09-06T00:30:12+00:00",
+  "wall_clock_s": 16.9,
+  "tokens_in": 2,
+  "tokens_out": 1095,
+  "cost_usd": 0.23618299999999998,
+  "verdict_text": "NO\n\nThe second task vector is taken against the already-modified base, not the unmodified base. After the first `add_` writes `base + 0.4*(ft1 - base)` into the MLP tensors, the `subtract_` for `tv2` computes `ft2 - (base + 0.4*(ft1 - base))`, so the output is `base + 0.24*(ft1 - base) + 0.4*(ft2 - base)` rather than the formula in Required result step 2 (this is exactly the ordering hazard the Objective warns about). The plan also has no assert that exactly 48 tensors were merged, which Required checks demands; the final count of 160 on `base` would hold even if the MLP regex matched fewer tensors or the temporaries were mishandled. Finally, step 1's name check is only partial: it asserts counts and non-MLP equality but nothing verifies that ft1/ft2 actually contain the 48 MLP names, so a missing or renamed MLP tensor in a fine-tune would be silently skipped rather than aborting.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "Task vector 2 is computed against the base after task vector 1 has already been added, so the second delta is taken from the wrong reference point.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

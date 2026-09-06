@@ -1,0 +1,49 @@
+# T3: mixed-precision export of OLMo-1B-0724-hf with 256MiB sharding.
+#
+# Projection matrices (q/k/v/o_proj, gate/up/down_proj) -> bfloat16.
+# Everything else (model.embed_tokens.weight, lm_head.weight) stays float32.
+# Nothing is deleted, no tensor is renamed.
+
+inputs:
+  - model::inputs/base
+
+output:
+  path: out/T3
+  format: safetensors
+  shard: 256MB          # binary units: 256MB = 268,435,456 bytes of tensor data
+
+transforms:
+
+  # --- preconditions on the input -------------------------------------------
+  - assert: { count: { of: '.*', is: 114 } }
+  - assert: { count: { of: 'model\.layers\.\d+\.(self_attn\.[qkvo]_proj|mlp\.(gate|up|down)_proj)\.weight', is: 112 } }
+  - assert: { dtype: { of: '.*', is: float32 } }
+
+  # --- the cast: exactly the 112 projection matrices, in place --------------
+  - cast_:
+      target: 'model\.layers\.\d+\.(self_attn\.[qkvo]_proj|mlp\.(gate|up|down)_proj)\.weight'
+      to: bfloat16
+
+  # --- required checks ------------------------------------------------------
+  # exactly 112 tensors are bfloat16: the 112 projections are bfloat16 ...
+  - assert: { count: { of: 'model\.layers\.\d+\.(self_attn\.[qkvo]_proj|mlp\.(gate|up|down)_proj)\.weight', is: 112 } }
+  - assert: { dtype: { of: 'model\.layers\.\d+\.(self_attn\.[qkvo]_proj|mlp\.(gate|up|down)_proj)\.weight', is: bfloat16 } }
+  # ... and everything else is still float32, so no 113th bfloat16 tensor exists.
+  - assert: { count: { of: '(?!model\.layers\.\d+\.(self_attn\.[qkvo]_proj|mlp\.(gate|up|down)_proj)\.weight$).*', is: 2 } }
+  - assert: { dtype: { of: '(?!model\.layers\.\d+\.(self_attn\.[qkvo]_proj|mlp\.(gate|up|down)_proj)\.weight$).*', is: float32 } }
+
+  - assert: { dtype: { of: 'model\.layers\.0\.self_attn\.q_proj\.weight', is: bfloat16 } }
+  - assert: { dtype: { of: 'model\.embed_tokens\.weight', is: float32 } }
+  - assert: { dtype: { of: 'lm_head\.weight', is: float32 } }
+
+  # the output has exactly 114 tensors
+  - assert: { count: { of: '.*', is: 114 } }
+
+  # --- values of the untouched tensors are unchanged ------------------------
+  - load: { path: inputs/base, alias: orig }
+  - assert:
+      equal:
+        left: 'orig::(?!model\.layers\.\d+\.(self_attn\.[qkvo]_proj|mlp\.(gate|up|down)_proj)\.weight$).*'
+        right: 'model::\g<0>'
+  - delete: { target: 'orig::.*' }
+  - assert: { count: { of: '.*', is: 114 } }

@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/pythia-1b/B/T3-defective.yaml",
+  "started_at": "2026-09-05T22:36:01+00:00",
+  "finished_at": "2026-09-05T22:36:20+00:00",
+  "wall_clock_s": 19.0,
+  "tokens_in": 2,
+  "tokens_out": 1686,
+  "cost_usd": 0.0555108,
+  "verdict_text": "NO\n\nThe cast-to-bfloat16 regex (`attention\\.query_key_value\\.weight|mlp\\.dense_h_to_4h\\.weight|mlp\\.dense_4h_to_h\\.weight`) omits `attention\\.dense\\.weight`, so only 3 of the 4 per-layer projection matrices (48 tensors, not 64) end up in bfloat16; `attention.dense.weight` is left in float32. This violates Required-result clause 1, which mandates casting exactly the 64 named matrices to bfloat16. The plan's own guard asserts a count of 48 for this pattern instead of the mandated \"exactly 64 tensors are bfloat16\" check, so it silently encodes the same omission rather than catching it, violating the \"Required checks\" section. The total-tensor-count assert (196) still passes since the miscast tensor is merely the wrong dtype, not missing, so this bug would not be caught before writing the output.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "One projection family is missing from the bfloat16 cast pattern (the attention output projection stays float32); the artifact's own count check was adjusted to the wrong number.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

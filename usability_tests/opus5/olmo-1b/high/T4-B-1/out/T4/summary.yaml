@@ -1,0 +1,145 @@
+transforms:
+- assert:
+    count:
+      of: base::.*
+      is: 114
+- assert:
+    count:
+      of: ft1::.*
+      is: 114
+- assert:
+    count:
+      of: ft2::.*
+      is: 114
+- assert:
+    count:
+      of: base::model\.layers\.\d+\.mlp\.(?:gate_proj|up_proj|down_proj)\.weight
+      is: 48
+- assert:
+    count:
+      of: ft1::model\.layers\.\d+\.mlp\.(?:gate_proj|up_proj|down_proj)\.weight
+      is: 48
+- assert:
+    count:
+      of: ft2::model\.layers\.\d+\.mlp\.(?:gate_proj|up_proj|down_proj)\.weight
+      is: 48
+- assert:
+    count:
+      of: base::(?!.*\.mlp\..*).*
+      is: 66
+- assert:
+    count:
+      of: ft1::(?!.*\.mlp\..*).*
+      is: 66
+- assert:
+    count:
+      of: ft2::(?!.*\.mlp\..*).*
+      is: 66
+- assert:
+    equal:
+      left: base::((?!.*\.mlp\..*).*)
+      right: ft1::\1
+- assert:
+    equal:
+      left: base::((?!.*\.mlp\..*).*)
+      right: ft2::\1
+- assert:
+    shape:
+      of: base::model\.layers\.0\.mlp\.gate_proj\.weight
+      is:
+      - 8192
+      - 2048
+- assert:
+    shape:
+      of: base::model\.layers\.0\.mlp\.up_proj\.weight
+      is:
+      - 8192
+      - 2048
+- assert:
+    shape:
+      of: base::model\.layers\.0\.mlp\.down_proj\.weight
+      is:
+      - 2048
+      - 8192
+- assert:
+    dtype:
+      of: base::model\.layers\.0\.mlp\.gate_proj\.weight
+      is: float32
+- assert:
+    dtype:
+      of: ft1::model\.layers\.0\.mlp\.gate_proj\.weight
+      is: float32
+- assert:
+    dtype:
+      of: ft2::model\.layers\.0\.mlp\.gate_proj\.weight
+      is: float32
+- assert:
+    dtype:
+      of: base::model\.layers\.0\.mlp\.down_proj\.weight
+      is: float32
+- assert:
+    dtype:
+      of: ft1::model\.layers\.0\.mlp\.down_proj\.weight
+      is: float32
+- assert:
+    dtype:
+      of: ft2::model\.layers\.0\.mlp\.down_proj\.weight
+      is: float32
+- copy:
+    from: ft1::(model\.layers\.\d+\.mlp\.(?:gate_proj|up_proj|down_proj)\.weight)
+    to: base::tv1.\1
+- copy:
+    from: ft2::(model\.layers\.\d+\.mlp\.(?:gate_proj|up_proj|down_proj)\.weight)
+    to: base::tv2.\1
+- assert:
+    count:
+      of: base::tv1\..*
+      is: 48
+- assert:
+    count:
+      of: base::tv2\..*
+      is: 48
+- subtract_:
+    from: base::(model\.layers\.\d+\.mlp\.(?:gate_proj|up_proj|down_proj)\.weight)
+    to: base::tv1.\1
+- subtract_:
+    from: base::(model\.layers\.\d+\.mlp\.(?:gate_proj|up_proj|down_proj)\.weight)
+    to: base::tv2.\1
+- scale_:
+    target: base::tv1\..*
+    by: 0.4
+- scale_:
+    target: base::tv2\..*
+    by: 0.4
+- add_:
+    from: base::tv1\.(.*)
+    to: base::\1
+- add_:
+    from: base::tv2\.(.*)
+    to: base::\1
+- delete:
+    target: base::tv1\..*
+- delete:
+    target: base::tv2\..*
+- assert:
+    not:
+      exists: base::tv1\..*
+- assert:
+    not:
+      exists: base::tv2\..*
+- assert:
+    count:
+      of: base::.*
+      is: 114
+- assert:
+    count:
+      of: base::model\.layers\.\d+\.mlp\.(?:gate_proj|up_proj|down_proj)\.weight
+      is: 48
+- assert:
+    count:
+      of: base::(?!.*\.mlp\..*).*
+      is: 66
+- assert:
+    equal:
+      left: base::((?!.*\.mlp\..*).*)
+      right: ft1::\1

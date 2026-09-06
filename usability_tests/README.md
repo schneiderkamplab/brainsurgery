@@ -210,6 +210,49 @@ layers times up to four tensors for OLMo); the renumbering moves in T1 are
 spelled out for the same reason. Both are genuine usability findings about
 the DSL and stay in the task set.
 
+## Results, repeat 1
+
+Sonnet 5, Opus 5 and Fable 5.1 through Claude Code; three effort tiers; 3
+targets x 5 tests x 3 conditions; one repeat; 405 cells, all under commit
+8b7c76a or later with the fixed doc pack. Records are under
+`usability_tests/<agent>/<target>/<effort>/`; the full table is `analyze.py`.
+
+| Condition | Success | First run OK | Median cost (USD) | Median time to solution | Median output tokens | Bug detected |
+|---|---|---|---|---|---|---|
+| P (Python) | 135/135 | 132/135 (98%) | 0.39 | 61 s | 3.8k | 135/135 |
+| F (free choice) | 135/135 | 122/135 (90%) | 0.49 | 87 s | 5.3k | 134/135 |
+| B (BrainSurgery) | 135/135 | 134/135 (99%) | 0.77 | 131 s | 7.0k | 135/135 |
+
+By agent (pooled over targets and tiers):
+
+| Agent | Cond | First run OK | Median cost | Median time |
+|---|---|---|---|---|
+| Sonnet 5 | P / F / B | 98% / 84% / 98% | 0.16 / 0.21 / 0.48 | 61 / 90 / 168 s |
+| Opus 5 | P / F / B | 98% / 93% / 100% | 0.38 / 0.54 / 0.76 | 69 / 113 / 134 s |
+| Fable 5.1 | P / F / B | 98% / 93% / 100% | 0.51 / 0.61 / 1.04 | 57 / 77 / 115 s |
+
+By effort tier (pooled over agents and targets):
+
+| Tier | Cond | First run OK | Median cost | Median time |
+|---|---|---|---|---|
+| low | P / F / B | 96% / 91% / 98% | 0.29 / 0.36 / 0.57 | 49 / 67 / 96 s |
+| medium | P / F / B | 98% / 89% / 100% | 0.37 / 0.53 / 0.76 | 61 / 85 / 121 s |
+| high | P / F / B | 100% / 91% / 100% | 0.53 / 0.69 / 1.13 | 86 / 130 / 183 s |
+
+Reading, for repeat 1: every one of the 405 cells passed, in every
+condition, on every target, for every agent and tier, with no cap hits, so
+correctness does not separate the conditions for these agents. Effort does,
+and the ordering is the same everywhere: a BrainSurgery plan costs about
+twice a Python script and takes about twice as long, the free-choice condition
+sits in between and has the lowest first-run success (tool invocations fail
+before the model falls back to a script), and raising the effort tier scales
+cost and time in all conditions without changing outcomes. The plan condition
+has the highest first-run success (134 of 135), which is what the executable
+checks in a plan are for. Bug detection is at or near 100 percent in all
+conditions, but only defective artifacts were shown (odd repeat); the
+false-alarm rate needs repeat 2. Repeat 1 cost 280.63 USD in total (233 solve,
+47 review) and about 5 hours of wall clock at four cells in parallel.
+
 ## Pilot, and what it changed
 
 A pilot (Sonnet 5, medium effort, one repeat, 45 cells) ran before the study

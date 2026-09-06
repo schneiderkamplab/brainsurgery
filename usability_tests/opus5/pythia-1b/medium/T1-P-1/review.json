@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/pythia-1b/P/T1-defective.py",
+  "started_at": "2026-09-05T23:24:41+00:00",
+  "finished_at": "2026-09-05T23:24:50+00:00",
+  "wall_clock_s": 9.3,
+  "tokens_in": 2,
+  "tokens_out": 567,
+  "cost_usd": 0.1050615,
+  "verdict_text": "NO\n\nThe artifact drops blocks `{2, 6, 10, 15}` instead of the specified `{2, 6, 10, 14}`, so it violates \"Required result\" clause 1 (\"Remove every tensor of blocks 2, 6, 10, 14\"). Consequently the kept set ends `..., 11, 12, 13, 14` and old block 14 is renumbered to 11, whereas clause 2 requires old 15 \u2192 11; the final block's 15 tensors therefore carry the wrong weights, and grading against the hidden reference fails on bit-exact values. The required checks do not catch this: after renumbering all indices are 0..11, so \"no tensor of blocks 12\u201315 remains\" passes vacuously, and both the 12-block and 184-tensor counts hold for the wrong drop set as well. Everything else \u2014 pattern-based whole-block targeting, collision-free renumbering via a fresh output dict, preservation of the 4 non-block tensors, and the single output file at `out/T1/model.safetensors` \u2014 matches the specification.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The drop set is off by one: the last dropped block is the one after the specified block (for example blocks 2, 5, 9 instead of 2, 5, 8). Block counts still match, so the artifact's own checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/P/T4-defective.py",
+  "started_at": "2026-09-05T22:56:13+00:00",
+  "finished_at": "2026-09-05T22:56:20+00:00",
+  "wall_clock_s": 7.0,
+  "tokens_in": 2,
+  "tokens_out": 432,
+  "cost_usd": 0.09544550000000002,
+  "verdict_text": "NO\n\nThe merge composes the two task vectors sequentially instead of taking both against the unmodified base: it computes `tmp = base + \u03bb(ft1 - base)` and then `tmp + \u03bb(ft2 - tmp)`, which expands to `(1-\u03bb)\u00b7tmp + \u03bb\u00b7ft2`, i.e. the second task vector is measured against the already-merged tensor. This violates \"Required result\" step 2, which mandates `out[X] = base[X] + \u03bb(ft1[X] - base[X]) + \u03bb(ft2[X] - base[X])`, and it is exactly the ordering hazard the specification calls out. The discrepancy is `\u03bb\u00b2(ft1 - base)`, far above the 1e-5 relative Frobenius tolerance for generic inputs, so the 48 merged tensors will fail grading. The other requirements (name-set and shared-tensor verification, merged count of 48, 114 output tensors, single output file) are correctly enforced.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "Task vector 2 is computed against the base after task vector 1 has already been added, so the second delta is taken from the wrong reference point.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

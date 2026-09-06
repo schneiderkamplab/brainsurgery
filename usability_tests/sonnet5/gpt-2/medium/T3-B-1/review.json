@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/B/T3-defective.yaml",
+  "started_at": "2026-09-05T21:37:47+00:00",
+  "finished_at": "2026-09-05T21:37:53+00:00",
+  "wall_clock_s": 6.3,
+  "tokens_in": 2,
+  "tokens_out": 247,
+  "cost_usd": 0.037906800000000004,
+  "verdict_text": "NO\n\nThe plan casts `attn.c_attn.weight`, `mlp.c_fc.weight`, and `mlp.c_proj.weight` to bfloat16 but omits `attn.c_proj.weight`, missing 12 of the 48 required matrices (spec Required result item 1). Its count assert also checks only 36 tensors match that pattern, not 48, so it will pass without catching the omission \u2014 violating the requirement that \"exactly 48 tensors are bfloat16\" (Required checks). The final `.*` count assert of 148 will still pass since total tensor count is unaffected, so this bug goes undetected by the plan's own checks, and the output will fail grading on dtype correctness for `h.<i>.attn.c_proj.weight`.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "One projection family is missing from the bfloat16 cast pattern (the attention output projection stays float32); the artifact's own count check was adjusted to the wrong number.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

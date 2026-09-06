@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/pythia-1b/P/T2-defective.py",
+  "started_at": "2026-09-06T01:42:54+00:00",
+  "finished_at": "2026-09-06T01:43:01+00:00",
+  "wall_clock_s": 7.0,
+  "tokens_in": 2,
+  "tokens_out": 335,
+  "cost_usd": 0.194204,
+  "verdict_text": "NO\n\nThe script sets `DROP_HEAD = 6`, so for every layer it keeps query_key_value rows 0..4607 and 5376..6143, and dense.weight columns 0..1535 and 1792..2047. The specification's \"Required result\" requires removing head 5: keep rows 0..3839 and 4608..6143 (items 1 and 2), and keep columns 0..1279 and 1536..2047 (item 3). The output shapes are correct, so the required checks all pass, but the retained values differ from the reference and the grader's bit-exact comparison will fail. Everything else (layout handling, ordering, untouched tensors, 244-tensor count, output path) matches the specification.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The removed head is off by one (head N+1 instead of head N). All shapes are still correct, so the artifact's own shape checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

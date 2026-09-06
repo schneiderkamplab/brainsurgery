@@ -1,0 +1,88 @@
+transforms:
+- assert:
+    count:
+      of: lora::base_model\.model\.model\.layers\.\d+\.self_attn\.[qv]_proj\.lora_A\.weight
+      is: 32
+- assert:
+    count:
+      of: lora::base_model\.model\.model\.layers\.\d+\.self_attn\.[qv]_proj\.lora_B\.weight
+      is: 32
+- assert:
+    count:
+      of: lora::.+
+      is: 64
+- assert:
+    count:
+      of: model::.+
+      is: 114
+- assert:
+    shape:
+      of: model::model\.layers\.0\.self_attn\.q_proj\.weight
+      is:
+      - 2048
+      - 2048
+- assert:
+    dtype:
+      of: model::model\.layers\.0\.self_attn\.q_proj\.weight
+      is: float32
+- assert:
+    shape:
+      of: lora::base_model\.model\.model\.layers\.0\.self_attn\.q_proj\.lora_A\.weight
+      is:
+      - 16
+      - 2048
+- assert:
+    shape:
+      of: lora::base_model\.model\.model\.layers\.0\.self_attn\.q_proj\.lora_B\.weight
+      is:
+      - 2048
+      - 16
+- matmul:
+    from_a: lora::base_model\.model\.model\.layers\.(\d+)\.(self_attn\.[qv]_proj)\.lora_B\.weight
+    from_b: lora::base_model.model.model.layers.\1.\2.lora_A.weight
+    to: model::merge_delta.\1.\2.weight
+- assert:
+    count:
+      of: model::merge_delta\..+
+      is: 32
+- assert:
+    shape:
+      of: model::merge_delta\.0\.self_attn\.q_proj\.weight
+      is:
+      - 2048
+      - 2048
+- assert:
+    dtype:
+      of: model::merge_delta\.0\.self_attn\.q_proj\.weight
+      is: float32
+- assert:
+    not:
+      iszero: model::merge_delta\.0\.self_attn\.q_proj\.weight
+- scale_:
+    target: model::merge_delta\..+
+    by: 2.0
+- add_:
+    from: model::merge_delta\.(\d+)\.(self_attn\.[qv]_proj)\.weight
+    to: model::model.layers.\1.\2.weight
+- delete:
+    target: model::merge_delta\..+
+- assert:
+    not:
+      exists: model::.*merge_delta.*
+- assert:
+    not:
+      exists: model::.*lora_.*
+- assert:
+    shape:
+      of: model::model\.layers\.0\.self_attn\.q_proj\.weight
+      is:
+      - 2048
+      - 2048
+- assert:
+    dtype:
+      of: model::model\.layers\.0\.self_attn\.q_proj\.weight
+      is: float32
+- assert:
+    count:
+      of: model::.+
+      is: 114

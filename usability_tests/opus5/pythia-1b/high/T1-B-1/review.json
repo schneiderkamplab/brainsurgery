@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/pythia-1b/B/T1-defective.yaml",
+  "started_at": "2026-09-06T00:09:31+00:00",
+  "finished_at": "2026-09-06T00:09:44+00:00",
+  "wall_clock_s": 13.7,
+  "tokens_in": 2,
+  "tokens_out": 853,
+  "cost_usd": 0.11739549999999999,
+  "verdict_text": "NO\n\nThe plan prunes the wrong set of blocks: the specification's Required result clause 1 says to remove blocks 2, 6, 10, **14**, but the delete (and its count assert) targets `gpt_neox\\.layers\\.(2|6|10|15)\\..*`, dropping block 15 instead. Consequently the renumbering in clause 2 is also wrong at the top: instead of old 15 becoming new 11, the plan moves old 14 to `gpt_neox.layers.11.*`, so the final block holds block 14's weights and block 15's weights are gone. Every required check still passes \u2014 60 deleted tensors, no residual blocks 12\u201315, 12 `query_key_value.weight` matches, 184 tensors total \u2014 because the counts are identical under either choice, so this is exactly the \"still loads and runs, silently wrong\" failure the task warns about. Grading against the hidden reference would fail on values for the last block (and on the identity of the dropped block). Everything else \u2014 lowest-first move ordering to avoid collisions, untouched non-block tensors, output path \u2014 is correct.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The drop set is off by one: the last dropped block is the one after the specified block (for example blocks 2, 5, 9 instead of 2, 5, 8). Block counts still match, so the artifact's own checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

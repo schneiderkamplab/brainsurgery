@@ -1,0 +1,48 @@
+inputs:
+  - model::inputs/base/model.safetensors
+
+transforms:
+  # 1. Drop the 48 non-parameter buffers (causal mask, masked_bias, rotary inv_freq).
+  #    Projection/dense *biases* are parameters and must survive, hence the exact alternation.
+  - assert:
+      count:
+        of: 'gpt_neox\.layers\.\d+\.attention\.(bias|masked_bias|rotary_emb\.inv_freq)'
+        is: 48
+  - delete:
+      target: 'gpt_neox\.layers\.\d+\.attention\.(bias|masked_bias|rotary_emb\.inv_freq)'
+
+  # 2. Everything left is float16 -> float32 (exact), then the projections go to bfloat16.
+  - cast_: { target: '.*', to: float32 }
+  - assert:
+      count:
+        of: 'gpt_neox\.layers\.\d+\.(attention\.(query_key_value|dense)|mlp\.(dense_h_to_4h|dense_4h_to_h))\.weight'
+        is: 64
+  - cast_:
+      target: 'gpt_neox\.layers\.\d+\.(attention\.(query_key_value|dense)|mlp\.(dense_h_to_4h|dense_4h_to_h))\.weight'
+      to: bfloat16
+
+  # 3. Required checks.
+  - assert:
+      all:
+        - dtype:
+            of: 'gpt_neox\.layers\.\d+\.(attention\.(query_key_value|dense)|mlp\.(dense_h_to_4h|dense_4h_to_h))\.weight'
+            is: bfloat16
+        - count:
+            of: 'gpt_neox\.layers\.\d+\.(attention\.(query_key_value|dense)|mlp\.(dense_h_to_4h|dense_4h_to_h))\.weight'
+            is: 64
+        - dtype:
+            of: 'gpt_neox\.layers\.0\.attention\.query_key_value\.weight'
+            is: bfloat16
+        - dtype:
+            of: 'gpt_neox\.embed_in\.weight'
+            is: float32
+        # no bfloat16 outside the 64 projections
+        - dtype:
+            of: '(?!gpt_neox\.layers\.\d+\.(attention\.(query_key_value|dense)|mlp\.(dense_h_to_4h|dense_4h_to_h))\.weight$).*'
+            is: float32
+        - count: { of: '.*', is: 196 }
+
+output:
+  path: out/T3
+  format: safetensors
+  shard: 256MB

@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/B/T5-defective.yaml",
+  "started_at": "2026-09-05T22:51:42+00:00",
+  "finished_at": "2026-09-05T22:51:48+00:00",
+  "wall_clock_s": 5.8,
+  "tokens_in": 2,
+  "tokens_out": 303,
+  "cost_usd": 0.0983395,
+  "verdict_text": "NO\n\nThe plan never applies the LoRA scaling factor `alpha / r = 2`: it computes `B @ A`, transposes it, and adds it directly, so each merged weight receives half the required delta. This violates \"Required result\" clause 1 (`h.<i>.<module>.weight += scale * (B @ A).T` with `scale = 2`), and the resulting relative Frobenius error on the 12 merged tensors will far exceed the 1e-5 grading tolerance. The comment `# defect: the alpha / r scale is missing` in the plan acknowledges this. Separately, `shard: 100MB` is decimal-suffixed while the specification requires a 100 MiB (104,857,600-byte) limit, which may also mis-size shards depending on how the tool interprets the suffix.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The adapter scaling factor alpha / r is missing: the raw low-rank product is added.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

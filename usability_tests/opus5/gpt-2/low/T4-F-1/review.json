@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/P/T4-defective.py",
+  "started_at": "2026-09-05T22:48:23+00:00",
+  "finished_at": "2026-09-05T22:48:29+00:00",
+  "wall_clock_s": 6.8,
+  "tokens_in": 2,
+  "tokens_out": 391,
+  "cost_usd": 0.0940715,
+  "verdict_text": "NO\n\nThe merge applies the second task vector against the already-updated tensor instead of the base: it computes `tmp = b + \u03bb(f1\u2212b)` and then `tmp + \u03bb(f2\u2212tmp)`, which equals `b + \u03bb(1\u2212\u03bb)(f1\u2212b) + \u03bb(f2\u2212b)` \u2014 the first fine-tune's contribution is scaled by an extra `(1\u2212\u03bb)` factor. This violates required-result clause 2, which specifies `out[X] = base[X] + \u03bb(ft1[X]\u2212base[X]) + \u03bb(ft2[X]\u2212base[X])`, both vectors taken against the unmodified base. It is exactly the ordering hazard the specification warns about, and the resulting relative Frobenius error on the 48 merged tensors will exceed the 1e-5 grading tolerance. The verification step, the merged-count check and the 160-tensor check are otherwise correct.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "Task vector 2 is computed against the base after task vector 1 has already been added, so the second delta is taken from the wrong reference point.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

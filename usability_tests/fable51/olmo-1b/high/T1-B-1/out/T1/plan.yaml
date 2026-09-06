@@ -1,0 +1,43 @@
+# T1: depth pruning of OLMo-1B-0724-hf, 16 -> 12 blocks, with contiguous renumbering.
+inputs:
+  - model::inputs/base
+
+transforms:
+  # Preflight: the input is the 16-layer model with 114 tensors.
+  - assert: { count: { of: '.*', is: 114 } }
+  - assert: { count: { of: 'model\.layers\.\d+\.self_attn\.q_proj\.weight', is: 16 } }
+
+  # 1. Remove every tensor of blocks 2, 6, 10, 14 (7 tensors each).
+  - delete: { target: 'model\.layers\.(2|6|10|14)\..+' }
+  - assert: { not: { exists: 'model\.layers\.(2|6|10|14)\..+' } }
+  - assert: { count: { of: '.*', is: 86 } }
+
+  # 2. Renumber survivors in ascending order of the old index. Each move shifts a
+  #    block down to an index that was either deleted or vacated by the previous
+  #    move, so no destination can already exist (move refuses collisions).
+  - move: { from: 'model\.layers\.3\.(.+)',  to: 'model.layers.2.\1' }
+  - move: { from: 'model\.layers\.4\.(.+)',  to: 'model.layers.3.\1' }
+  - move: { from: 'model\.layers\.5\.(.+)',  to: 'model.layers.4.\1' }
+  - move: { from: 'model\.layers\.7\.(.+)',  to: 'model.layers.5.\1' }
+  - move: { from: 'model\.layers\.8\.(.+)',  to: 'model.layers.6.\1' }
+  - move: { from: 'model\.layers\.9\.(.+)',  to: 'model.layers.7.\1' }
+  - move: { from: 'model\.layers\.11\.(.+)', to: 'model.layers.8.\1' }
+  - move: { from: 'model\.layers\.12\.(.+)', to: 'model.layers.9.\1' }
+  - move: { from: 'model\.layers\.13\.(.+)', to: 'model.layers.10.\1' }
+  - move: { from: 'model\.layers\.15\.(.+)', to: 'model.layers.11.\1' }
+
+  # Required checks.
+  # (a) no tensor of blocks 12..15 remains
+  - assert: { not: { exists: 'model\.layers\.(12|13|14|15)\..+' } }
+  # (b) exactly 12 blocks remain, and they are exactly indices 0..11, 7 tensors each
+  - assert: { count: { of: 'model\.layers\.\d+\.self_attn\.q_proj\.weight', is: 12 } }
+  - assert: { count: { of: 'model\.layers\.(\d|1[01])\..+', is: 84 } }
+  # (c) exactly 86 tensors in total
+  - assert: { count: { of: '.*', is: 86 } }
+  # Non-block tensors still present with the expected shapes.
+  - assert: { shape: { of: 'model\.embed_tokens\.weight', is: [50304, 2048] } }
+  - assert: { shape: { of: 'lm_head\.weight', is: [50304, 2048] } }
+
+output:
+  path: out/T1/model.safetensors
+  format: safetensors

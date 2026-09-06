@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/B/T2-defective.yaml",
+  "started_at": "2026-09-05T22:07:34+00:00",
+  "finished_at": "2026-09-05T22:07:43+00:00",
+  "wall_clock_s": 9.5,
+  "tokens_in": 2,
+  "tokens_out": 660,
+  "cost_usd": 0.0702248,
+  "verdict_text": "NO\n\nThe artifact removes head index 6 (columns/rows 384:448) instead of head index 5 (320:384), as its own comment states (\"remove attention head 6\"). This violates Required-result clauses 1\u20133, which specify keeping columns/rows `0..319, 384..767, ...` (removing the 320:384 block) for `c_attn.weight`/`c_attn.bias`, and rows `0..319, 384..767` for `c_proj.weight` \u2014 the artifact instead keeps `0..383, 448..767`. While the final shapes ([768,2112], [2112], [704,768]) match and the assert checks pass, the actual columns/rows retained are wrong, so the tensor values will not match the hidden reference and grading will fail on bit-exactness.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The removed head is off by one (head N+1 instead of head N). All shapes are still correct, so the artifact's own shape checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

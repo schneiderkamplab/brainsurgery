@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/pythia-1b/B/T2-defective.yaml",
+  "started_at": "2026-09-05T21:55:33+00:00",
+  "finished_at": "2026-09-05T21:55:44+00:00",
+  "wall_clock_s": 11.3,
+  "tokens_in": 2,
+  "tokens_out": 619,
+  "cost_usd": 0.0687978,
+  "verdict_text": "NO\n\nThe plan removes head 6, not head 5, contradicting \"Required result: For every layer `i`, remove head 5.\" The QKV slices keep rows `[0:4608]` and `[5376:6144]` (excising rows 4608\u20135375, which is head 6's 768-row block), instead of the spec's `0..3839, 4608..6143` (excising head 5's block, rows 3840\u20134607). Correspondingly the dense-weight slices keep columns `[0:1536]` and `[1792:2048]` (excising columns 1536\u20131791, head 6), instead of the required `0..1279, 1536..2047` (excising columns 1280\u20131535, head 5). The final shapes ([5376,2048], [5376], [2048,1792]) and the assert checks all match by coincidence since head width is uniform, so the checks pass despite the wrong head having been pruned \u2014 a bit-exact grading comparison against the hidden reference (which removes head 5) will fail.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The removed head is off by one (head N+1 instead of head N). All shapes are still correct, so the artifact's own shape checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

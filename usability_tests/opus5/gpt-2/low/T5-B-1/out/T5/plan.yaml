@@ -1,0 +1,189 @@
+inputs:
+  - model::inputs/base/model.safetensors
+  - lora::inputs/lora/adapter_model.safetensors
+
+transforms:
+  - assert:
+      count: { of: 'lora::.*\.lora_A\.weight', is: 12 }
+  - assert:
+      count: { of: 'lora::.*\.lora_B\.weight', is: 12 }
+  - matmul:
+      from_a: 'lora::base_model.model.h.0.attn.c_attn.lora_B.weight'
+      from_b: 'lora::base_model.model.h.0.attn.c_attn.lora_A.weight'
+      to: 'model::tmpdelta.0.ba'
+  - permute:
+      from: 'model::tmpdelta.0.ba'
+      to: 'model::tmpdelta.0.t'
+      order: [1, 0]
+  - scale_:
+      target: 'model::tmpdelta.0.t'
+      by: 2.0
+  - add_:
+      from: 'model::tmpdelta.0.t'
+      to: 'model::h.0.attn.c_attn.weight'
+  - matmul:
+      from_a: 'lora::base_model.model.h.1.attn.c_attn.lora_B.weight'
+      from_b: 'lora::base_model.model.h.1.attn.c_attn.lora_A.weight'
+      to: 'model::tmpdelta.1.ba'
+  - permute:
+      from: 'model::tmpdelta.1.ba'
+      to: 'model::tmpdelta.1.t'
+      order: [1, 0]
+  - scale_:
+      target: 'model::tmpdelta.1.t'
+      by: 2.0
+  - add_:
+      from: 'model::tmpdelta.1.t'
+      to: 'model::h.1.attn.c_attn.weight'
+  - matmul:
+      from_a: 'lora::base_model.model.h.2.attn.c_attn.lora_B.weight'
+      from_b: 'lora::base_model.model.h.2.attn.c_attn.lora_A.weight'
+      to: 'model::tmpdelta.2.ba'
+  - permute:
+      from: 'model::tmpdelta.2.ba'
+      to: 'model::tmpdelta.2.t'
+      order: [1, 0]
+  - scale_:
+      target: 'model::tmpdelta.2.t'
+      by: 2.0
+  - add_:
+      from: 'model::tmpdelta.2.t'
+      to: 'model::h.2.attn.c_attn.weight'
+  - matmul:
+      from_a: 'lora::base_model.model.h.3.attn.c_attn.lora_B.weight'
+      from_b: 'lora::base_model.model.h.3.attn.c_attn.lora_A.weight'
+      to: 'model::tmpdelta.3.ba'
+  - permute:
+      from: 'model::tmpdelta.3.ba'
+      to: 'model::tmpdelta.3.t'
+      order: [1, 0]
+  - scale_:
+      target: 'model::tmpdelta.3.t'
+      by: 2.0
+  - add_:
+      from: 'model::tmpdelta.3.t'
+      to: 'model::h.3.attn.c_attn.weight'
+  - matmul:
+      from_a: 'lora::base_model.model.h.4.attn.c_attn.lora_B.weight'
+      from_b: 'lora::base_model.model.h.4.attn.c_attn.lora_A.weight'
+      to: 'model::tmpdelta.4.ba'
+  - permute:
+      from: 'model::tmpdelta.4.ba'
+      to: 'model::tmpdelta.4.t'
+      order: [1, 0]
+  - scale_:
+      target: 'model::tmpdelta.4.t'
+      by: 2.0
+  - add_:
+      from: 'model::tmpdelta.4.t'
+      to: 'model::h.4.attn.c_attn.weight'
+  - matmul:
+      from_a: 'lora::base_model.model.h.5.attn.c_attn.lora_B.weight'
+      from_b: 'lora::base_model.model.h.5.attn.c_attn.lora_A.weight'
+      to: 'model::tmpdelta.5.ba'
+  - permute:
+      from: 'model::tmpdelta.5.ba'
+      to: 'model::tmpdelta.5.t'
+      order: [1, 0]
+  - scale_:
+      target: 'model::tmpdelta.5.t'
+      by: 2.0
+  - add_:
+      from: 'model::tmpdelta.5.t'
+      to: 'model::h.5.attn.c_attn.weight'
+  - matmul:
+      from_a: 'lora::base_model.model.h.6.attn.c_attn.lora_B.weight'
+      from_b: 'lora::base_model.model.h.6.attn.c_attn.lora_A.weight'
+      to: 'model::tmpdelta.6.ba'
+  - permute:
+      from: 'model::tmpdelta.6.ba'
+      to: 'model::tmpdelta.6.t'
+      order: [1, 0]
+  - scale_:
+      target: 'model::tmpdelta.6.t'
+      by: 2.0
+  - add_:
+      from: 'model::tmpdelta.6.t'
+      to: 'model::h.6.attn.c_attn.weight'
+  - matmul:
+      from_a: 'lora::base_model.model.h.7.attn.c_attn.lora_B.weight'
+      from_b: 'lora::base_model.model.h.7.attn.c_attn.lora_A.weight'
+      to: 'model::tmpdelta.7.ba'
+  - permute:
+      from: 'model::tmpdelta.7.ba'
+      to: 'model::tmpdelta.7.t'
+      order: [1, 0]
+  - scale_:
+      target: 'model::tmpdelta.7.t'
+      by: 2.0
+  - add_:
+      from: 'model::tmpdelta.7.t'
+      to: 'model::h.7.attn.c_attn.weight'
+  - matmul:
+      from_a: 'lora::base_model.model.h.8.attn.c_attn.lora_B.weight'
+      from_b: 'lora::base_model.model.h.8.attn.c_attn.lora_A.weight'
+      to: 'model::tmpdelta.8.ba'
+  - permute:
+      from: 'model::tmpdelta.8.ba'
+      to: 'model::tmpdelta.8.t'
+      order: [1, 0]
+  - scale_:
+      target: 'model::tmpdelta.8.t'
+      by: 2.0
+  - add_:
+      from: 'model::tmpdelta.8.t'
+      to: 'model::h.8.attn.c_attn.weight'
+  - matmul:
+      from_a: 'lora::base_model.model.h.9.attn.c_attn.lora_B.weight'
+      from_b: 'lora::base_model.model.h.9.attn.c_attn.lora_A.weight'
+      to: 'model::tmpdelta.9.ba'
+  - permute:
+      from: 'model::tmpdelta.9.ba'
+      to: 'model::tmpdelta.9.t'
+      order: [1, 0]
+  - scale_:
+      target: 'model::tmpdelta.9.t'
+      by: 2.0
+  - add_:
+      from: 'model::tmpdelta.9.t'
+      to: 'model::h.9.attn.c_attn.weight'
+  - matmul:
+      from_a: 'lora::base_model.model.h.10.attn.c_attn.lora_B.weight'
+      from_b: 'lora::base_model.model.h.10.attn.c_attn.lora_A.weight'
+      to: 'model::tmpdelta.10.ba'
+  - permute:
+      from: 'model::tmpdelta.10.ba'
+      to: 'model::tmpdelta.10.t'
+      order: [1, 0]
+  - scale_:
+      target: 'model::tmpdelta.10.t'
+      by: 2.0
+  - add_:
+      from: 'model::tmpdelta.10.t'
+      to: 'model::h.10.attn.c_attn.weight'
+  - matmul:
+      from_a: 'lora::base_model.model.h.11.attn.c_attn.lora_B.weight'
+      from_b: 'lora::base_model.model.h.11.attn.c_attn.lora_A.weight'
+      to: 'model::tmpdelta.11.ba'
+  - permute:
+      from: 'model::tmpdelta.11.ba'
+      to: 'model::tmpdelta.11.t'
+      order: [1, 0]
+  - scale_:
+      target: 'model::tmpdelta.11.t'
+      by: 2.0
+  - add_:
+      from: 'model::tmpdelta.11.t'
+      to: 'model::h.11.attn.c_attn.weight'
+  - delete: { target: 'model::tmpdelta\..*' }
+  - assert:
+      not: { exists: 'model::.*lora_.*' }
+  - assert:
+      shape: { of: 'model::h.0.attn.c_attn.weight', is: [768, 2304] }
+  - assert:
+      count: { of: 'model::.*', is: 160 }
+
+output:
+  path: out/T5
+  format: safetensors
+  shard: 100MB

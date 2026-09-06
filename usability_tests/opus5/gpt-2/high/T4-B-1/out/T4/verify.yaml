@@ -1,0 +1,26 @@
+# Independent check of the written output: recompute the merge in the
+# equivalent closed form 0.2*base + 0.4*ft1 + 0.4*ft2 and compare.
+inputs:
+  - base::inputs/base/model.safetensors
+  - ft1::inputs/ft1/model.safetensors
+  - ft2::inputs/ft2/model.safetensors
+  - out::out/T4/model.safetensors
+transforms:
+  - assert: { count: { of: 'out::.*', is: 160 } }
+  - assert: { dtype: { of: 'out::.*', is: float32 } }
+  - assert: { count: { of: 'out::h\.\d+\.mlp\..*', is: 48 } }
+  - assert: { shape: { of: 'out::h\.\d+\.mlp\.c_fc\.weight', is: [768, 3072] } }
+  - assert: { shape: { of: 'out::h\.\d+\.mlp\.c_proj\.weight', is: [3072, 768] } }
+  # 112 unchanged tensors must be bit-exact copies of the base
+  - assert: { equal: { left: 'out::(?!h\.\d+\.mlp\.).+', right: 'base::\g<0>' } }
+  # 48 merged tensors vs the closed form
+  - scale: { from: 'base::(h\.\d+\.mlp\..*)', to: 'base::alt.\1', by: 0.2 }
+  - copy:  { from: 'ft1::(h\.\d+\.mlp\..*)', to: 'base::s1.\1' }
+  - scale_: { target: 'base::s1\..*', by: 0.4 }
+  - copy:  { from: 'ft2::(h\.\d+\.mlp\..*)', to: 'base::s2.\1' }
+  - scale_: { target: 'base::s2\..*', by: 0.4 }
+  - add_: { from: 'base::s1\.(h\.\d+\.mlp\..*)', to: 'base::alt.\1' }
+  - add_: { from: 'base::s2\.(h\.\d+\.mlp\..*)', to: 'base::alt.\1' }
+  - assert: { equal: { left: 'out::(h\.\d+\.mlp\..*)', right: 'base::alt.\1', eps: 1e-6 } }
+  # and they really are different from the base
+  - assert: { not: { equal: { left: 'out::(h\.\d+\.mlp\..*)', right: 'base::\1' } } }

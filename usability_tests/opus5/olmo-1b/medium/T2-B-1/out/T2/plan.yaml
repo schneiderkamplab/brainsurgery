@@ -1,0 +1,120 @@
+# T2: structured attention-head pruning of OLMo-1B-0724-hf.
+#
+# Head 5 of 16 (head_dim 128) is removed from every layer. q/k/v hold heads as
+# row blocks ([out, in] nn.Linear layout), so rows 640..767 go away; o_proj
+# consumes the heads on its input side, so columns 640..767 go away.
+#
+# Strategy per tensor (regex over all 16 layers at once):
+#   1. copy a correctly *shaped* slice into a scratch name,
+#   2. assign the two kept blocks into it in the right order,
+#   3. delete the original and move the scratch back onto its name.
+
+inputs:
+  - model::inputs/base
+
+output:
+  path: out/T2/model.safetensors
+  format: safetensors
+
+transforms:
+  # ---- Preflight: the input really has the layout the task describes. -------
+  - assert: { count: { of: '.*', is: 114 } }
+  - assert:
+      shape: { of: 'model\.layers\.(\d+)\.self_attn\.q_proj\.weight', is: [2048, 2048] }
+  - assert:
+      shape: { of: 'model\.layers\.(\d+)\.self_attn\.k_proj\.weight', is: [2048, 2048] }
+  - assert:
+      shape: { of: 'model\.layers\.(\d+)\.self_attn\.v_proj\.weight', is: [2048, 2048] }
+  - assert:
+      shape: { of: 'model\.layers\.(\d+)\.self_attn\.o_proj\.weight', is: [2048, 2048] }
+
+  # ---- Scratch tensors with the pruned shape ([1920, 2048] / [2048, 1920]).
+  # Contents are overwritten block by block below; only the shape matters here.
+  - copy:
+      from: 'model\.layers\.(\d+)\.self_attn\.q_proj\.weight::[128:, :]'
+      to: 'model.layers.\1.self_attn.q_proj.weight.pruned'
+  - copy:
+      from: 'model\.layers\.(\d+)\.self_attn\.k_proj\.weight::[128:, :]'
+      to: 'model.layers.\1.self_attn.k_proj.weight.pruned'
+  - copy:
+      from: 'model\.layers\.(\d+)\.self_attn\.v_proj\.weight::[128:, :]'
+      to: 'model.layers.\1.self_attn.v_proj.weight.pruned'
+  - copy:
+      from: 'model\.layers\.(\d+)\.self_attn\.o_proj\.weight::[:, 128:]'
+      to: 'model.layers.\1.self_attn.o_proj.weight.pruned'
+
+  - assert:
+      shape: { of: 'model\.layers\.(\d+)\.self_attn\.q_proj\.weight\.pruned', is: [1920, 2048] }
+  - assert:
+      shape: { of: 'model\.layers\.(\d+)\.self_attn\.k_proj\.weight\.pruned', is: [1920, 2048] }
+  - assert:
+      shape: { of: 'model\.layers\.(\d+)\.self_attn\.v_proj\.weight\.pruned', is: [1920, 2048] }
+  - assert:
+      shape: { of: 'model\.layers\.(\d+)\.self_attn\.o_proj\.weight\.pruned', is: [2048, 1920] }
+
+  # ---- Heads 0..4 (rows/cols 0..639) keep their position. ------------------
+  - assign:
+      from: 'model\.layers\.(\d+)\.self_attn\.q_proj\.weight::[:640, :]'
+      to: 'model.layers.\1.self_attn.q_proj.weight.pruned::[:640, :]'
+  - assign:
+      from: 'model\.layers\.(\d+)\.self_attn\.k_proj\.weight::[:640, :]'
+      to: 'model.layers.\1.self_attn.k_proj.weight.pruned::[:640, :]'
+  - assign:
+      from: 'model\.layers\.(\d+)\.self_attn\.v_proj\.weight::[:640, :]'
+      to: 'model.layers.\1.self_attn.v_proj.weight.pruned::[:640, :]'
+  - assign:
+      from: 'model\.layers\.(\d+)\.self_attn\.o_proj\.weight::[:, :640]'
+      to: 'model.layers.\1.self_attn.o_proj.weight.pruned::[:, :640]'
+
+  # ---- Heads 6..15 (rows/cols 768..2047) shift down by one head (128). -----
+  - assign:
+      from: 'model\.layers\.(\d+)\.self_attn\.q_proj\.weight::[768:, :]'
+      to: 'model.layers.\1.self_attn.q_proj.weight.pruned::[640:, :]'
+  - assign:
+      from: 'model\.layers\.(\d+)\.self_attn\.k_proj\.weight::[768:, :]'
+      to: 'model.layers.\1.self_attn.k_proj.weight.pruned::[640:, :]'
+  - assign:
+      from: 'model\.layers\.(\d+)\.self_attn\.v_proj\.weight::[768:, :]'
+      to: 'model.layers.\1.self_attn.v_proj.weight.pruned::[640:, :]'
+  - assign:
+      from: 'model\.layers\.(\d+)\.self_attn\.o_proj\.weight::[:, 768:]'
+      to: 'model.layers.\1.self_attn.o_proj.weight.pruned::[:, 640:]'
+
+  # ---- Swap the scratch tensors onto the original names. -------------------
+  - delete: { target: 'model\.layers\.(\d+)\.self_attn\.[qkv]_proj\.weight' }
+  - delete: { target: 'model\.layers\.(\d+)\.self_attn\.o_proj\.weight' }
+  - move:
+      from: 'model\.layers\.(\d+)\.self_attn\.q_proj\.weight\.pruned'
+      to: 'model.layers.\1.self_attn.q_proj.weight'
+  - move:
+      from: 'model\.layers\.(\d+)\.self_attn\.k_proj\.weight\.pruned'
+      to: 'model.layers.\1.self_attn.k_proj.weight'
+  - move:
+      from: 'model\.layers\.(\d+)\.self_attn\.v_proj\.weight\.pruned'
+      to: 'model.layers.\1.self_attn.v_proj.weight'
+  - move:
+      from: 'model\.layers\.(\d+)\.self_attn\.o_proj\.weight\.pruned'
+      to: 'model.layers.\1.self_attn.o_proj.weight'
+
+  # ---- Required checks (TASK.md). ------------------------------------------
+  - assert:
+      shape: { of: 'model\.layers\.0\.self_attn\.q_proj\.weight', is: [1920, 2048] }
+  - assert:
+      shape: { of: 'model\.layers\.0\.self_attn\.k_proj\.weight', is: [1920, 2048] }
+  - assert:
+      shape: { of: 'model\.layers\.0\.self_attn\.v_proj\.weight', is: [1920, 2048] }
+  - assert:
+      shape: { of: 'model\.layers\.0\.self_attn\.o_proj\.weight', is: [2048, 1920] }
+  - assert: { count: { of: '.*', is: 114 } }
+
+  # ---- Extra safety: every layer pruned, no scratch tensor left behind. ----
+  - assert:
+      shape: { of: 'model\.layers\.(\d+)\.self_attn\.q_proj\.weight', is: [1920, 2048] }
+  - assert:
+      shape: { of: 'model\.layers\.(\d+)\.self_attn\.k_proj\.weight', is: [1920, 2048] }
+  - assert:
+      shape: { of: 'model\.layers\.(\d+)\.self_attn\.v_proj\.weight', is: [1920, 2048] }
+  - assert:
+      shape: { of: 'model\.layers\.(\d+)\.self_attn\.o_proj\.weight', is: [2048, 1920] }
+  - assert: { not: { exists: '.*\.pruned' } }
+  - assert: { count: { of: 'model\.layers\.(\d+)\.mlp\..*', is: 48 } }

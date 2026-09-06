@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/P/T2-defective.py",
+  "started_at": "2026-09-05T21:06:05+00:00",
+  "finished_at": "2026-09-05T21:06:09+00:00",
+  "wall_clock_s": 4.3,
+  "tokens_in": 2,
+  "tokens_out": 195,
+  "cost_usd": 0.038444799999999994,
+  "verdict_text": "NO\n\nThe script removes head 6 (`DROP_HEAD = 6`) instead of head 5, violating the \"Required result\" clause \"remove head 5\" and the exact column/row ranges given in items 1\u20133 (which specify keeping columns/rows `0..319, 384..767, ...`, i.e., dropping the block `320..383` etc. corresponding to head 5, not head 6). Although the shape assertions happen to pass (since removing any single head yields the same output shapes), the actual retained/removed slice is wrong, so the values will not match the hidden reference \u2014 a bit-exact grading failure.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The removed head is off by one (head N+1 instead of head N). All shapes are still correct, so the artifact's own shape checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

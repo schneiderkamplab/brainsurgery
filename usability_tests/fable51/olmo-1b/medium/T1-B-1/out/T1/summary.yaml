@@ -1,0 +1,71 @@
+transforms:
+- assert:
+    count:
+      of: model\.layers\.\d+\.self_attn\.q_proj\.weight
+      is: 16
+- assert:
+    count:
+      of: .*
+      is: 114
+- delete:
+    target: model\.layers\.(2|6|10|14)\..*
+- assert:
+    count:
+      of: .*
+      is: 86
+- assert:
+    not:
+      exists: model\.layers\.(2|6|10|14)\..*
+- move:
+    from: model\.layers\.3\.(.*)
+    to: model.layers.2.\1
+- move:
+    from: model\.layers\.4\.(.*)
+    to: model.layers.3.\1
+- move:
+    from: model\.layers\.5\.(.*)
+    to: model.layers.4.\1
+- move:
+    from: model\.layers\.7\.(.*)
+    to: model.layers.5.\1
+- move:
+    from: model\.layers\.8\.(.*)
+    to: model.layers.6.\1
+- move:
+    from: model\.layers\.9\.(.*)
+    to: model.layers.7.\1
+- move:
+    from: model\.layers\.11\.(.*)
+    to: model.layers.8.\1
+- move:
+    from: model\.layers\.12\.(.*)
+    to: model.layers.9.\1
+- move:
+    from: model\.layers\.13\.(.*)
+    to: model.layers.10.\1
+- move:
+    from: model\.layers\.15\.(.*)
+    to: model.layers.11.\1
+- assert:
+    not:
+      exists: model\.layers\.1[2-5]\..*
+- assert:
+    count:
+      of: model\.layers\.\d+\.self_attn\.q_proj\.weight
+      is: 12
+- assert:
+    count:
+      of: model\.layers\.(\d|1[01])\.self_attn\.q_proj\.weight
+      is: 12
+- assert:
+    count:
+      of: model\.layers\.\d+\..*
+      is: 84
+- assert:
+    count:
+      of: .*
+      is: 86
+- assert:
+    exists: model\.embed_tokens\.weight
+- assert:
+    exists: lm_head\.weight
