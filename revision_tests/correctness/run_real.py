@@ -63,6 +63,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    verify_tensor_hash_dtypes()
     cases_doc = load_real_cases()
     repo_info = collect_repo_info()
     commit_short = repo_info["commit"][:8] if repo_info["commit"] else "unknown"
@@ -399,6 +400,21 @@ def read_tensor(layout: CheckpointLayout, name: str) -> torch.Tensor:
 
 def metadata_list(layout: CheckpointLayout) -> list[dict[str, str] | None]:
     return [read_metadata(path) for path in layout.data_files]
+
+
+def verify_tensor_hash_dtypes() -> None:
+    samples = (
+        torch.tensor(1.5, dtype=torch.float16),
+        torch.tensor(1.5, dtype=torch.bfloat16),
+        torch.tensor(1.5, dtype=torch.float32),
+        torch.tensor(2, dtype=torch.int64),
+        torch.tensor(True, dtype=torch.bool),
+    )
+    for sample in samples:
+        first = tensor_sha256(sample)
+        second = tensor_sha256(sample.clone())
+        if first != second or len(first) != 64:
+            raise RuntimeError(f"tensor hash self-check failed for {sample.dtype}")
 
 
 def verify_huggingface_revision(

@@ -734,7 +734,9 @@ def tensor_identity(left: torch.Tensor, right: torch.Tensor) -> bool:
 
 
 def tensor_sha256(tensor: torch.Tensor) -> str:
-    data = tensor.detach().cpu().contiguous().view(torch.uint8).numpy()
+    # Reshape first so scalar tensors can be reinterpreted as bytes. PyTorch
+    # rejects a direct dtype-changing view on a zero-dimensional tensor.
+    data = tensor.detach().cpu().contiguous().reshape(-1).view(torch.uint8).numpy()
     return hashlib.sha256(data).hexdigest()
 
 
