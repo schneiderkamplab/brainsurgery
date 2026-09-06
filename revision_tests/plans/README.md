@@ -1,0 +1,10 @@
+# Revision test plans
+
+- [`revision_plan.md`](revision_plan.md) maps each reviewer concern to a
+  proposed response and keeps out-of-scope items visible without promising
+  their implementation.
+- [`execution_plan.md`](execution_plan.md) lists work that runs here on macOS
+  first, followed by work that requires Linux or CUDA.
+
+These tracked copies are canonical. Update them here so every machine receives
+the same plan through Git; do not maintain divergent copies under `private/`.

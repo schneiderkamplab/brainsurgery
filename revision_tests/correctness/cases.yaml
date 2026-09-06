@@ -1,0 +1,97 @@
+protocol_id: eacl2027_correctness_v1
+provider: inmemory
+cases:
+  - id: C01
+    name: identity_serialization
+    classification: lossless
+    write_set: [math.a]
+    transforms:
+      - scale_: {target: 'math\.a', by: 1.0}
+    output_mode: single
+
+  - id: C02
+    name: rename_inverse
+    classification: lossless_metamorphic
+    write_set: [layer.0.weight]
+    transforms:
+      - move: {from: 'layer\.0\.weight', to: temporary.layer.0.weight}
+      - move: {from: 'temporary\.layer\.0\.weight', to: layer.0.weight}
+    output_mode: single
+
+  - id: C03
+    name: copy
+    classification: lossless_structural
+    write_set: [copy.clone]
+    transforms:
+      - copy: {from: 'copy\.source', to: copy.clone}
+    output_mode: single
+
+  - id: C04
+    name: move
+    classification: lossless_structural
+    write_set: [move.source, move.destination]
+    transforms:
+      - move: {from: 'move\.source', to: move.destination}
+    output_mode: single
+
+  - id: C05
+    name: delete
+    classification: lossless_structural
+    write_set: [delete.target]
+    transforms:
+      - delete: {target: 'delete\.target'}
+    output_mode: single
+
+  - id: C06
+    name: split_concat_inverse
+    classification: lossless_metamorphic
+    write_set: [matrix.weight]
+    transforms:
+      - split:
+          from: 'matrix\.weight'
+          to: [temporary.matrix.left, temporary.matrix.right]
+          sizes: [2, 2]
+          dim: 1
+      - delete: {target: 'matrix\.weight'}
+      - concat:
+          from: [temporary.matrix.left, temporary.matrix.right]
+          to: matrix.weight
+          dim: 1
+      - delete: {target: 'temporary\.matrix\.(left|right)'}
+    output_mode: single
+
+  - id: C07
+    name: arithmetic
+    classification: exact_arithmetic_oracle
+    write_set: [math.add, math.subtract, math.multiply, math.scaled]
+    transforms:
+      - add: {from_a: 'math\.a', from_b: math.b, to: math.add}
+      - subtract: {from_a: 'math\.a', from_b: math.b, to: math.subtract}
+      - multiply: {from_a: 'math\.a', from_b: math.b, to: math.multiply}
+      - scale: {from: 'math\.a', to: math.scaled, by: 0.5}
+    output_mode: single
+
+  - id: C08
+    name: same_dtype_cast
+    classification: lossless
+    write_set: [cast.same]
+    transforms:
+      - cast_: {target: 'cast\.same', to: float32}
+    output_mode: single
+
+  - id: C09
+    name: float32_to_bfloat16
+    classification: intentionally_lossy_oracle
+    write_set: [cast.lossy]
+    transforms:
+      - cast_: {target: 'cast\.lossy', to: bfloat16}
+    output_mode: single
+
+  - id: C10
+    name: sharded_save_reload
+    classification: lossless_serialization
+    write_set: [math.a]
+    transforms:
+      - scale_: {target: 'math\.a', by: 1.0}
+    output_mode: sharded_reload
+    shard_size: 1KB
