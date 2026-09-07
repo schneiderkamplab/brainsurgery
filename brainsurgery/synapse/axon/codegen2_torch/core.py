@@ -11,6 +11,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+from ...int8 import materialize_int8_aliases
 from ...mxfp4 import materialize_mxfp4_aliases
 from ...ops import get_op_semantics
 from ..ast import (
@@ -1381,6 +1382,7 @@ class Codegen2GraphModel(nn.Module):
     def load_state_dict_tensors(self, state_dict: dict[str, torch.Tensor]) -> None:
         loaded = dict(state_dict)
         materialize_mxfp4_aliases(loaded, drop_packed=True)
+        materialize_int8_aliases(loaded, drop_packed=True)
         _materialize_packed_parameters(
             loaded,
             tuple(_packed_parameter_spec_payload(item) for item in self.graph.packed_parameters),
@@ -1889,6 +1891,43 @@ class Codegen2GraphModel(nn.Module):
         half = x.shape[-1] // 2
         rotated = torch.cat((-x[..., half:], x[..., :half]), dim=-1)
         return (x * cos) + (rotated * sin)
+
+    @classmethod
+    def _sdpa(
+        cls,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        attn_mask: Any,
+        scale: Any = None,
+        enable_gqa: bool = True,
+        extra_bias: Any = None,
+    ) -> torch.Tensor:
+        k = cls._move_to(k, q.device)
+        v = cls._move_to(v, q.device)
+        attn_mask = cls._move_to(attn_mask, q.device)
+        target_dtype = v.dtype
+        if q.dtype != target_dtype:
+            q = q.to(dtype=target_dtype)
+        if k.dtype != target_dtype:
+            k = k.to(dtype=target_dtype)
+        if torch.is_tensor(attn_mask) and attn_mask.dtype != torch.bool and attn_mask.dtype != target_dtype:
+            attn_mask = attn_mask.to(dtype=target_dtype)
+        if extra_bias is not None:
+            extra_bias = cls._move_to(extra_bias, q.device)
+            if torch.is_tensor(attn_mask) and attn_mask.dtype == torch.bool:
+                attn_mask = torch.where(attn_mask, 0.0, float("-inf")).to(dtype=target_dtype)
+            attn_mask = attn_mask + extra_bias
+        return F.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            attn_mask=attn_mask,
+            dropout_p=0.0,
+            is_causal=False,
+            scale=None if scale is None else float(scale),
+            enable_gqa=enable_gqa,
+        )
 
     @staticmethod
     def _gegelu(x: torch.Tensor, limit: Any = None, alpha: Any = 1.702) -> torch.Tensor:
@@ -2412,6 +2451,24 @@ class Codegen2GraphModel(nn.Module):
             out(y)
             return True
 
+        if primitive == "_torch_rmsnorm_scaled":
+            if len(args) < 2:
+                raise ValueError("_torch_rmsnorm_scaled expects x and scale_path")
+            x = args[0]
+            scale_path = args[1]
+            eps = float(args[2]) if len(args) > 2 and not self._is_null(args[2]) else 1e-6
+            cast_float = bool(args[3]) if len(args) > 3 and not self._is_null(args[3]) else True
+            weight = self._param(self._compose_path(scale_path)) if isinstance(scale_path, GraphPath) else self._param(scale_path)
+            if cast_float:
+                x_f = x.float()
+                y = x_f * torch.rsqrt(torch.mean(x_f * x_f, dim=-1, keepdim=True) + eps)
+                y = weight * y.to(dtype=x.dtype)
+            else:
+                y = x * torch.rsqrt(torch.mean(x * x, dim=-1, keepdim=True) + eps)
+                y = weight * y
+            out(y)
+            return True
+
         if primitive == "conv1d":
             if len(args) != 8:
                 raise ValueError("conv1d expects x, weight, bias, stride, padding_left, padding_right, dilation, groups")
@@ -2422,7 +2479,8 @@ class Codegen2GraphModel(nn.Module):
             if primitive == "activations_gelu":
                 out(F.gelu(x))
             else:
-                out(0.5 * x * (1.0 + torch.tanh(0.7978845608028654 * (x + 0.044715 * x * x * x))))
+                x_f = x.float() if x.is_floating_point() else x
+                out((0.5 * x_f * (1.0 + torch.tanh(0.7978845608028654 * (x_f + 0.044715 * x_f * x_f * x_f)))).to(dtype=x.dtype))
             return True
         if primitive == "activations_tanh":
             out(torch.tanh(args[0]))
@@ -2829,7 +2887,7 @@ class Codegen2GraphModel(nn.Module):
             right = self._eval_graph_operand(node.inputs[1], env=env, symbols=symbols)
             assign(self._eval_binary(operator, left, right))
             return
-        if op == "__torch_sdpa":
+        if op == "__torch_sdpa" or op == "__triton_sdpa":
             if len(node.inputs) < 6:
                 raise ValueError("__torch_sdpa expects q, k, v, additive_mask, scale, enable_gqa")
             q = self._eval_graph_operand(node.inputs[0], env=env, symbols=symbols)
@@ -2838,20 +2896,12 @@ class Codegen2GraphModel(nn.Module):
             additive_mask = self._eval_graph_operand(node.inputs[3], env=env, symbols=symbols)
             scale = self._eval_graph_operand(node.inputs[4], env=env, symbols=symbols)
             enable_gqa = bool(self._eval_graph_operand(node.inputs[5], env=env, symbols=symbols))
-            if torch.is_tensor(q):
-                k = self._move_to(k, q.device)
-                v = self._move_to(v, q.device)
-                additive_mask = self._move_to(additive_mask, q.device)
+            extra_bias = None
+            if len(node.inputs) >= 7:
+                extra_bias = self._eval_graph_operand(node.inputs[6], env=env, symbols=symbols)
             assign(
-                F.scaled_dot_product_attention(
-                    q,
-                    k,
-                    v,
-                    attn_mask=additive_mask,
-                    dropout_p=0.0,
-                    is_causal=False,
-                    scale=None if scale is None else float(scale),
-                    enable_gqa=enable_gqa,
+                self._sdpa(
+                    q, k, v, additive_mask, scale, enable_gqa, extra_bias=extra_bias,
                 )
             )
             return
@@ -3433,11 +3483,33 @@ class _DirectTorchEmitter:
         add(lines, 8, "del strict")
         add(lines, 8, "state_dict = self._filter_state_dict(state_dict)")
         add(lines, 8, "state = dict(state_dict)")
+        add(lines, 8, "self._materialize_int8_aliases(state)")
         add(lines, 8, "_materialize_packed_parameters(state, self._PACKED_PARAMETER_SPECS)")
         add(lines, 8, "self.state_dict_tensors = self._place_state_dict(state, self.param_devices)")
         add(lines, 8, "self.setup()")
         add(lines, 8, "self._symbols = self._eval_symbols()")
         add(lines, 8, "return self")
+        add(lines, 4, "")
+        add(lines, 4, "@staticmethod")
+        add(lines, 4, "def _materialize_int8_aliases(state_dict):")
+        add(lines, 8, "# W8A16 export layout ('<base>.int8' int8 + '<base>.scale' fp32, symmetric")
+        add(lines, 8, "# per-output-channel absmax over dim 1): dequantize to bf16 on load,")
+        add(lines, 8, "# bit-identical to the published '-dequant' bf16 checkpoints.")
+        add(lines, 8, "for key in list(state_dict.keys()):")
+        add(lines, 12, "k = str(key)")
+        add(lines, 12, "if not k.endswith('.int8'):")
+        add(lines, 16, "continue")
+        add(lines, 12, "base = k[: -len('.int8')]")
+        add(lines, 12, "scale_key = f'{base}.scale'")
+        add(lines, 12, "if scale_key not in state_dict or torch.is_tensor(state_dict.get(base)):")
+        add(lines, 16, "continue")
+        add(lines, 12, "q = state_dict[key]")
+        add(lines, 12, "scale = state_dict[scale_key]")
+        add(lines, 12, "deq = q.float() * scale.float().unsqueeze(1)")
+        add(lines, 12, "state_dict[base] = deq.to(torch.bfloat16)")
+        add(lines, 12, "state_dict.pop(key, None)")
+        add(lines, 12, "state_dict.pop(scale_key, None)")
+        add(lines, 8, "return state_dict")
         add(lines, 4, "")
         add(lines, 4, "def setup(self):")
         add(lines, 8, "pass")
@@ -3552,6 +3624,25 @@ class _DirectTorchEmitter:
         add(lines, 8, "half = x.shape[-1] // 2")
         add(lines, 8, "rotated = torch.cat((-x[..., half:], x[..., :half]), dim=-1)")
         add(lines, 8, "return (x * cos) + (rotated * sin)")
+        add(lines, 4, "")
+        add(lines, 4, "@classmethod")
+        add(lines, 4, "def _sdpa(cls, q, k, v, attn_mask, scale=None, enable_gqa=True, extra_bias=None):")
+        add(lines, 8, "k = cls._move_to(k, q.device)")
+        add(lines, 8, "v = cls._move_to(v, q.device)")
+        add(lines, 8, "attn_mask = cls._move_to(attn_mask, q.device)")
+        add(lines, 8, "target_dtype = v.dtype")
+        add(lines, 8, "if q.dtype != target_dtype:")
+        add(lines, 12, "q = q.to(dtype=target_dtype)")
+        add(lines, 8, "if k.dtype != target_dtype:")
+        add(lines, 12, "k = k.to(dtype=target_dtype)")
+        add(lines, 8, "if torch.is_tensor(attn_mask) and attn_mask.dtype != torch.bool and attn_mask.dtype != target_dtype:")
+        add(lines, 12, "attn_mask = attn_mask.to(dtype=target_dtype)")
+        add(lines, 8, "if extra_bias is not None:")
+        add(lines, 12, "extra_bias = cls._move_to(extra_bias, q.device)")
+        add(lines, 12, "if torch.is_tensor(attn_mask) and attn_mask.dtype == torch.bool:")
+        add(lines, 16, "attn_mask = torch.where(attn_mask, 0.0, float('-inf')).to(dtype=target_dtype)")
+        add(lines, 12, "attn_mask = attn_mask + extra_bias")
+        add(lines, 8, "return F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, dropout_p=0.0, is_causal=False, scale=None if scale is None else float(scale), enable_gqa=enable_gqa)")
         add(lines, 4, "")
         add(lines, 4, "_compose_path = staticmethod(_common_compose_path)")
         add(lines, 4, "_render_path = staticmethod(_common_render_path)")
@@ -5809,13 +5900,19 @@ class _DirectTorchEmitter:
         if primitive == "_torch_sdpa":
             if len(args) < 6:
                 raise ValueError("__torch_sdpa expects q, k, v, additive_mask, scale, enable_gqa")
-            scale = "None" if isinstance(node.inputs[4], GraphLiteral) and node.inputs[4].value is None else f"({args[4]} if {args[4]} is None else float({args[4]}))"
+            if isinstance(node.inputs[4], GraphLiteral):
+                _scale_val = node.inputs[4].value
+                scale = "None" if _scale_val is None else repr(float(_scale_val))
+            else:
+                scale = f"({args[4]} if {args[4]} is None else float({args[4]}))"
+            if len(args) >= 7:
+                return (
+                    f"self._sdpa({args[0]}, {args[1]}, {args[2]}, {args[3]}, "
+                    f"scale={scale}, enable_gqa={bool_arg(5)}, extra_bias={args[6]})"
+                )
             return (
-                f"(lambda _q, _k, _v, _mask: F.scaled_dot_product_attention("
-                f"_q, self._move_to(_k, _q.device), self._move_to(_v, _q.device), "
-                f"attn_mask=self._move_to(_mask, _q.device), dropout_p=0.0, is_causal=False, "
-                f"scale={scale}, "
-                f"enable_gqa={bool_arg(5)}))({args[0]}, {args[1]}, {args[2]}, {args[3]})"
+                f"self._sdpa({args[0]}, {args[1]}, {args[2]}, {args[3]}, "
+                f"scale={scale}, enable_gqa={bool_arg(5)})"
             )
         if primitive == "_torch_rope_apply_factors":
             if len(args) < 4:
@@ -5996,6 +6093,16 @@ class _DirectTorchEmitter:
             y_float = f"({x_float} * torch.rsqrt(torch.mean({x_float} * {x_float}, dim=-1, keepdim=True) + {eps}))"
             y = f"({x} * torch.rsqrt(torch.mean({x} * {x}, dim=-1, keepdim=True) + {eps}))"
             return f"({y_float}.to(dtype={x}.dtype) if {cast_float} else {y})"
+        if primitive == "_torch_rmsnorm_scaled":
+            x = args[0]
+            scale_path = args[1]
+            eps = float_arg(2, "1e-6")
+            cast_float = bool_arg(3, "True")
+            weight = f"self._param({scale_path})"
+            x_float = f"{x}.float()"
+            y_float = f"({weight} * ({x_float} * torch.rsqrt(torch.mean({x_float} * {x_float}, dim=-1, keepdim=True) + {eps})).to(dtype={x}.dtype))"
+            y = f"({weight} * ({x} * torch.rsqrt(torch.mean({x} * {x}, dim=-1, keepdim=True) + {eps})))"
+            return f"({y_float} if {cast_float} else {y})"
         if primitive == "conv1d":
             return f"self._conv1d({args[0]}, {args[1]}, {args[2]}, {args[3]}, {args[4]}, {args[5]}, {args[6]}, {args[7]})"
         if primitive == "tensor_like":
@@ -6084,8 +6191,8 @@ class _DirectTorchEmitter:
             "activations_relu": lambda: f"F.relu({args[0]})",
             "activations_relu2": lambda: f"(F.relu({args[0]}) * F.relu({args[0]}))",
             "activations_gelu": lambda: f"F.gelu({args[0]})",
-            "activations_gelu_new": lambda: f"(0.5 * {args[0]} * (1.0 + torch.tanh(0.7978845608028654 * ({args[0]} + 0.044715 * {args[0]} * {args[0]} * {args[0]}))))",
-            "activations_gelu_pytorch_tanh": lambda: f"(0.5 * {args[0]} * (1.0 + torch.tanh(0.7978845608028654 * ({args[0]} + 0.044715 * {args[0]} * {args[0]} * {args[0]}))))",
+            "activations_gelu_new": lambda: f"(0.5 * {args[0]}.float() * (1.0 + torch.tanh(0.7978845608028654 * ({args[0]}.float() + 0.044715 * {args[0]}.float() * {args[0]}.float() * {args[0]}.float())))).to(dtype={args[0]}.dtype)",
+            "activations_gelu_pytorch_tanh": lambda: f"(0.5 * {args[0]}.float() * (1.0 + torch.tanh(0.7978845608028654 * ({args[0]}.float() + 0.044715 * {args[0]}.float() * {args[0]}.float() * {args[0]}.float())))).to(dtype={args[0]}.dtype)",
             "activations_gegelu": lambda: f"self._gegelu({args[0]}, {args[1] if len(args) > 1 else 'None'})",
             "activations_xielu": lambda: f"self._xielu({args[0]}, {args[1]}, {args[2]}, {args[3]}, {args[4]})",
             "list_init": lambda: "[]",

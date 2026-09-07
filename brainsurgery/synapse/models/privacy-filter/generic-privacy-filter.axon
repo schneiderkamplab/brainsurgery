@@ -1,0 +1,118 @@
+{-# CHECKPOINTS ["openai/privacy-filter"] #-}
+{-# TASK "masked_lm" #-}
+
+import Activations (sigmoid)
+import Attention (attention_gqa_banded, merge_heads, reshape_heads)
+import Masking (Mask, banded_mask_for_input, mask_for_input)
+import Math (clamp, log, sqrt)
+import Params (param)
+import Positions (position_ids, rope_hf_yarn_factors, rope_pair_hf_yarn_factors)
+import Config
+import NN
+import Tensor
+
+
+
+-- OpenAI privacy-filter: gpt-oss-derived MoE encoder for token classification.
+-- Binds the opf-native checkpoint layout (embedding.weight, block.N.attn.qkv.*,
+-- block.N.mlp.swiglu.*, norm.scale, unembedding.weight) so opf
+-- checkpoint directories load without conversion.
+MODEL_DIM <- Config.dim@@hidden_size default=640                   -- residual hidden size
+VOCAB_SIZE <- Config.dim@@vocab_size default=200064                -- o200k_base vocabulary
+NUM_LABELS <- Config.dim@@num_labels default=33                    -- BIOES tag count
+NUM_LAYERS <- Config.dim@@num_hidden_layers default=8              -- encoder depth
+NUM_HEADS <- Config.dim@@num_attention_heads default=14            -- query head count
+KVH <- Config.dim@@num_key_value_heads default=2                   -- key/value head count
+HEAD_DIM <- Config.dim@@head_dim default=64                        -- per-head hidden size
+QD  = NUM_HEADS * HEAD_DIM                                         -- query projection width
+KVD = KVH * HEAD_DIM                                               -- key/value projection width
+E <- Config.dim@@num_experts default=128                           -- total experts
+EPT <- Config.int@@experts_per_token default=4                     -- routed experts per token
+FFN <- Config.dim@@intermediate_size default=640                   -- per-expert hidden size
+LEFT_CTX <- Config.int@@bidirectional_left_context default=128     -- band reach left of the query
+RIGHT_CTX <- Config.int@@bidirectional_right_context default=128   -- band reach right of the query
+THETA <- Config.float@@rope_theta default=150000.0                 -- base RoPE theta
+ROPE_SCALE <- Config.float@@rope_scaling_factor default=32.0       -- YaRN scaling factor
+ROPE_LOW_FREQ <- Config.float@@rope_ntk_alpha default=1.0          -- YaRN slow beta (ntk_alpha)
+ROPE_HIGH_FREQ <- Config.float@@rope_ntk_beta default=32.0         -- YaRN fast beta (ntk_beta)
+ROPE_CONTEXT <- Config.int@@initial_context_length default=4096    -- YaRN train context
+ROPE_ATTN_FACTOR = 0.1 * (log ROPE_SCALE) + 1.0                    -- YaRN concentration
+ATTN_SCALE = 1.0 / sqrt HEAD_DIM                                   -- qk scaling
+EPS = 1e-05                                                        -- RMSNorm epsilon
+SWIGLU_ALPHA = 1.702                                               -- SwiGLU slope
+SWIGLU_LIMIT = 7.0                                                 -- SwiGLU clamp threshold
+LN2 = 0.6931471805599453                                           -- sinks are stored in log2 space
+
+rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+rms@path x = NN.rmsnorm@path x eps=EPS cast_float=true scale_path=@scale
+
+-- opf SwiGLU: contiguous halves [glu | linear] (packed_geglu=false), asymmetric
+-- clamp, and a +1 bias on the linear half.
+opf_swiglu :: Tensor[B,T,TOPK,W] -> Float -> Float -> Tensor[B,T,TOPK,H]
+opf_swiglu gate_up alpha limit = do
+  gate, up <- Tensor.chunk gate_up parts=2
+  gate <- clamp gate max=limit
+  up <- clamp up min=(0.0 - limit) max=limit
+  return (up + 1.0) * (gate * sigmoid (gate * alpha))
+
+moe :: Tensor[B,S,D] -> Tensor[B,S,D]
+moe x = do
+  m <- scope@mlp do
+    xn <- rms@norm x
+    -- opf computes the router in fp32 even for bf16 weights (t.float() @
+    -- gate.weight.float()); matching it keeps expert routing identical near ties.
+    router_in <- Tensor.cast xn dtype="float32"
+    gate_w <- param path=@gate.weight |> Tensor.cast dtype="float32"
+    gate_b <- param path=@gate.bias |> Tensor.cast dtype="float32"
+    router_logits <- (Tensor.matmul router_in (Tensor.transpose gate_w dim1=0 dim2=1)) + gate_b
+    -- routing weights stay fp32 end-to-end, as in opf (softmax fp32, applied fp32)
+    topk_vals, topk_idx <- Tensor.topk router_logits k=EPT dim=-1
+    topk_scores <- Tensor.softmax topk_vals dim=-1
+    x_sel <- Tensor.unsqueeze xn 2 |> Tensor.expand shape=[B, S, EPT, MODEL_DIM]
+    gate_up <- NN.expert_linear@swiglu x_sel topk_idx dim=(2 * FFN) bias=true transpose=true
+    ff <- opf_swiglu gate_up SWIGLU_ALPHA SWIGLU_LIMIT
+    x_upd <- NN.expert_linear@out ff topk_idx dim=MODEL_DIM bias=true transpose=true
+    -- opf combines weighted expert outputs in fp32 (o.float() -> index_add ->
+    -- cast); doing the multiply+sum in bf16 loses a rounding step vs stock.
+    x_upd32 <- Tensor.cast x_upd dtype="float32"
+    scale32 <- Tensor.unsqueeze topk_scores -1 |> Tensor.cast dtype="float32"
+    combined <- Tensor.sum (x_upd32 * scale32) dim=2 keepdim=false
+    return Tensor.cast_like combined xn
+  return m
+
+pf_block :: Tensor[B,S,D] -> Int -> Tensor[B,1,S,HEAD_DIM] -> Tensor[B,1,S,HEAD_DIM] -> IdxTensor[S,W] -> Tensor[B,S,W] -> Tensor[B,S,D]
+pf_block x i rope_sin rope_cos band_idx band_keep = do
+  a <- scope@attn do
+    xn <- rms@norm x
+    qkv <- NN.linear@qkv xn dim=(QD + 2 * KVD) bias=true
+    q <- Tensor.slice qkv dim=-1 start=0 end=QD |> reshape_heads heads=NUM_HEADS
+    k <- Tensor.slice qkv dim=-1 start=QD end=(QD + KVD) |> reshape_heads heads=KVH
+    v <- Tensor.slice qkv dim=-1 start=(QD + KVD) end=(QD + 2 * KVD) |> reshape_heads heads=KVH
+    q, k <- rope_pair_hf_yarn_factors q k rope_sin rope_cos interleaved=true
+    sink <- param path=@sinks
+    sink_base <- Tensor.reshape sink shape=[1, NUM_HEADS, 1, 1]
+    sink_ref <- Tensor.slice q dim=-1 start=0 end=1
+    sink_logits <- (sink_ref * 0.0) + (sink_base * LN2)
+    -- fp32_compute mirrors opf's fp32 attention scores/softmax (bf16 weights);
+    -- cast_like matches opf's cast back to the out-projection dtype (model.py:650).
+    a <- attention_gqa_banded q k v band_idx band_keep scale=ATTN_SCALE sink_logits=sink_logits fp32_compute=true |> merge_heads |> Tensor.cast_like xn
+    return NN.linear@out a dim=MODEL_DIM bias=true
+  x <- x + a
+  return x + (moe x)
+
+privacy_filter :: TokenIds[B,S] -> ?Mask[B,S,S] -> Tensor[B,S,NUM_LABELS]
+privacy_filter input_ids attn_mask = do
+  attn_mask <- mask_for_input input_ids attn_mask S
+  pos_ids <- position_ids input_ids
+  rope_ref <- Tensor.zeros input_ids shape=[B, 1, S, HEAD_DIM] dtype="float32"
+  -- opf applies RoPE to interleaved even/odd channel pairs (original OpenAI
+  -- layout); HF checkpoints permute q/k weights instead, opf ones do not.
+  rope_sin, rope_cos <- rope_hf_yarn_factors rope_ref pos_ids THETA ROPE_SCALE ROPE_LOW_FREQ ROPE_HIGH_FREQ ROPE_CONTEXT attention_factor=ROPE_ATTN_FACTOR truncate=false interleaved=true
+  band_idx, band_keep <- banded_mask_for_input input_ids S LEFT_CTX RIGHT_CTX padding_mask=attn_mask
+  x <- NN.embedding@embedding input_ids dim=MODEL_DIM
+  x <- for@block i <- [0..NUM_LAYERS) carry (x) do
+    x <- pf_block x i rope_sin rope_cos band_idx band_keep
+    yield x
+  x <- rms@norm x
+  logits <- NN.linear@unembedding x dim=NUM_LABELS bias=false
+  return logits

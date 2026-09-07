@@ -1,0 +1,103 @@
+{-# CHECKPOINTS ["nanochat-students/nanochat-d20"] #-}
+{-# TASK "causal_lm" #-}
+
+import Activations (relu2, tanh)
+import Attention (attention, merge_heads, reshape_heads)
+import Masking (Mask, causal_mask_for_input, mask_for_input, mask_length_for_input)
+import Math (mul)
+import Params (has_root)
+import Positions (position_ids, rope_base_factors, rope_pair_base_factors)
+import Cache
+import Config
+import NN
+import Tensor
+
+
+
+MODEL_DIM <- ((Config.dim@@hidden_size default=1280) :: Dim)
+
+VOCAB_SIZE <- ((Config.dim@@vocab_size default=65536) :: Dim)
+
+NUM_LAYERS <- ((Config.dim@@num_hidden_layers default=20) :: Dim)
+
+NUM_HEADS <- ((Config.dim@@num_attention_heads default=10) :: Dim)
+
+KVH <- ((Config.dim@@num_key_value_heads default=10) :: Dim)
+
+HAS_HEAD_DIM <- (Config.has_value@@head_dim)
+
+MODEL_HEAD_DIM <- (HAS_HEAD_DIM ? (Config.dim@@head_dim default=128) : (MODEL_DIM / NUM_HEADS) :: Dim)
+
+QD <- do
+  return (NUM_HEADS * MODEL_HEAD_DIM :: Dim)
+
+KVD <- do
+  return (KVH * MODEL_HEAD_DIM :: Dim)
+
+FFN <- ((Config.dim@@intermediate_size default=5120) :: Dim)
+
+EPS <- (Config.float@@rms_norm_eps default=1e-06)
+
+THETA <- (Config.float@@rope_theta default=10000.0)
+
+MAX_POSITIONS <- ((Config.dim@@max_position_embeddings default=2048) :: Dim)
+
+LOGIT_SOFTCAP <- (Config.float@@logits_soft_cap default=15.0)
+
+HAS_LM_HEAD <- do
+  return has_root "lm_head"
+
+norm :: Tensor[B,S,D] -> Tensor[B,S,D]
+norm x = NN.rmsnorm_noscale x eps=EPS
+
+nanochat_block :: Tensor[B,S,D] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,K] -> ?CacheLayer[B,KVH,P,MAX_POSITIONS,DH] -> (Tensor[B,S,D], ?CacheLayer[B,KVH,K,MAX_POSITIONS,DH])
+nanochat_block x rope_sin rope_cos mask past_kv = do
+  xn <- norm x
+  a, new_kv <- scope@self_attn do
+    q <- NN.linear@q_proj xn dim=QD |> reshape_heads heads=NUM_HEADS
+    k <- NN.linear@k_proj xn dim=KVD |> reshape_heads heads=KVH
+    v <- NN.linear@v_proj xn dim=KVD |> reshape_heads heads=KVH
+    q, k <- rope_pair_base_factors q k rope_sin rope_cos
+    q <- NN.rmsnorm_noscale q eps=EPS
+    k <- NN.rmsnorm_noscale k eps=EPS
+    k, v, new_kv <- Cache.update past_kv k v
+    k <- Tensor.repeat k repeats=(NUM_HEADS / KVH)
+    v <- Tensor.repeat v repeats=(NUM_HEADS / KVH)
+    a <- attention q k v mask |> merge_heads |> NN.linear@o_proj dim=MODEL_DIM
+    return a, new_kv
+  x <- x + a
+  xn <- norm x
+  m <- scope@mlp do
+    h <- NN.linear@fc1 xn dim=FFN
+    return h |> relu2 |> NN.linear@fc2 dim=MODEL_DIM
+  return x + m, new_kv
+
+nanochat :: TokenIds[B,S] -> ?Mask[B,K,MAX_POSITIONS] -> ?Cache[B,KVH,P,MAX_POSITIONS,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KVH,K,MAX_POSITIONS,DH])
+nanochat input_ids attn_mask past_kv use_cache = do
+  past_length <- Cache.past_length past_kv
+  attn_mask <- mask_for_input input_ids attn_mask MAX_POSITIONS
+  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=past_length
+  rope_sin, rope_cos <- ((rope_base_factors pos_ids MODEL_HEAD_DIM THETA) :: (Tensor[B,1,S,MODEL_HEAD_DIM], Tensor[B,1,S,MODEL_HEAD_DIM]))
+  rope_sin <- 0 - rope_sin
+  key_len <- mask_length_for_input input_ids attn_mask past_length
+  mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=MAX_POSITIONS
+  work_kv <- Cache.prepare past_kv use_cache MAX_POSITIONS
+  read_kv <- Cache.read past_kv work_kv
+  x, new_kv <- scope@model do
+    x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
+    x <- norm x
+    x, work_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, work_kv) do
+      past_i <- Cache.index read_kv i
+      x, new_i <- nanochat_block x rope_sin rope_cos mask past_i
+      work_kv <- Cache.append work_kv new_i
+      yield x, work_kv
+    x <- norm x
+    return x, work_kv
+  new_length <- past_length + S
+  new_kv <- Cache.finish new_kv new_length
+  new_kv <- use_cache ? new_kv : null
+  logits <- HAS_LM_HEAD ? (NN.linear@lm_head x dim=VOCAB_SIZE weight_path=@@lm_head.weight) : (NN.linear@model.embed_tokens x dim=VOCAB_SIZE)
+  logits <- logits / LOGIT_SOFTCAP
+  logits <- tanh logits
+  logits <- logits * LOGIT_SOFTCAP
+  return logits, new_kv

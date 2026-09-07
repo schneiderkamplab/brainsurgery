@@ -1,0 +1,26 @@
+{
+  "name": "axon",
+  "displayName": "Axon",
+  "description": "Syntax highlighting for the Axon DSL",
+  "version": "0.1.0",
+  "publisher": "brainsurgery",
+  "engines": { "vscode": "^1.0.0" },
+  "categories": ["Programming Languages"],
+  "contributes": {
+    "languages": [
+      {
+        "id": "axon",
+        "aliases": ["Axon", "axon"],
+        "extensions": [".axon"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "axon",
+        "scopeName": "source.axon",
+        "path": "./syntaxes/axon.tmLanguage.json"
+      }
+    ]
+  }
+}

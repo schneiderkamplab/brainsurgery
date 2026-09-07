@@ -708,12 +708,18 @@ class _DirectJaxEmitter(_DirectTorchEmitter):
         add(lines, 8, "if isinstance(value, jax.Array):")
         add(lines, 12, "return value")
         add(lines, 8, "import numpy as np")
+        add(lines, 8, "import torch")
+        add(lines, 8, "if isinstance(value, torch.Tensor) and value.dtype == torch.bfloat16:")
+        add(lines, 12, "return jnp.asarray(value.float().numpy(), dtype=jnp.bfloat16)")
         add(lines, 8, "return jnp.asarray(np.asarray(value))")
         add(lines, 4, "")
         add(lines, 4, "def _state_array_from_numpy(self, value):")
         add(lines, 8, "if isinstance(value, jax.Array):")
         add(lines, 12, "return value")
         add(lines, 8, "import numpy as np")
+        add(lines, 8, "import torch")
+        add(lines, 8, "if isinstance(value, torch.Tensor) and value.dtype == torch.bfloat16:")
+        add(lines, 12, "return jnp.asarray(value.float().numpy(), dtype=jnp.bfloat16)")
         add(lines, 8, "return jnp.asarray(np.asarray(value))")
         add(lines, 4, "")
         add(lines, 4, "@staticmethod")
@@ -1102,39 +1108,63 @@ class _DirectJaxEmitter(_DirectTorchEmitter):
         add(lines, 4, "")
         add(lines, 4, "@staticmethod")
         add(lines, 4, "def _layer_norm(x, weight=None, bias=None, eps=1e-5):")
-        add(lines, 8, "y = nn.standardize(x, axis=-1, epsilon=float(eps))")
-        add(lines, 8, "if weight is not None: y = y * weight")
-        add(lines, 8, "if bias is not None: y = y + bias")
-        add(lines, 8, "return y")
+        add(lines, 8, "out_dtype = weight.dtype if weight is not None else x.dtype")
+        add(lines, 8, "y = nn.standardize(x.astype(jnp.float32), axis=-1, epsilon=float(eps))")
+        add(lines, 8, "if weight is not None: y = y * weight.astype(jnp.float32)")
+        add(lines, 8, "if bias is not None: y = y + bias.astype(jnp.float32)")
+        add(lines, 8, "return y.astype(out_dtype)")
         add(lines, 4, "")
         add(lines, 4, "@staticmethod")
         add(lines, 4, "def _rms_norm(x, weight=None, eps=1e-6):")
-        add(lines, 8, "y = x * jax.lax.rsqrt(jnp.mean(x.astype(jnp.float32) * x.astype(jnp.float32), axis=-1, keepdims=True) + float(eps))")
-        add(lines, 8, "y = y.astype(x.dtype)")
-        add(lines, 8, "return y if weight is None else y * weight")
+        add(lines, 8, "out_dtype = x.dtype")
+        add(lines, 8, "x32 = x.astype(jnp.float32)")
+        add(lines, 8, "y = x32 * jax.lax.rsqrt(jnp.mean(x32 * x32, axis=-1, keepdims=True) + float(eps))")
+        add(lines, 8, "if weight is not None: y = y * weight.astype(jnp.float32)")
+        add(lines, 8, "return y.astype(out_dtype)")
         add(lines, 4, "")
         add(lines, 4, "@staticmethod")
-        add(lines, 4, "def _sdpa(q, k, v, mask=None, scale=None):")
-        add(lines, 8, "if q.shape[1] != k.shape[1]:")
-        add(lines, 12, "if q.shape[1] > k.shape[1] and k.shape[1] > 0 and q.shape[1] % k.shape[1] == 0:")
-        add(lines, 16, "repeat = q.shape[1] // k.shape[1]")
-        add(lines, 16, "k = jnp.repeat(k, repeat, axis=1)")
-        add(lines, 16, "v = jnp.repeat(v, repeat, axis=1)")
-        add(lines, 12, "elif k.shape[1] > q.shape[1] and q.shape[1] > 0 and k.shape[1] % q.shape[1] == 0:")
-        add(lines, 16, "q = jnp.repeat(q, k.shape[1] // q.shape[1], axis=1)")
+        add(lines, 4, "def _sdpa(q, k, v, mask=None, scale=None, extra_bias=None):")
+        add(lines, 8, "target_dtype = v.dtype")
+        add(lines, 8, "if q.dtype != target_dtype:")
+        add(lines, 12, "q = q.astype(target_dtype)")
+        add(lines, 8, "if k.dtype != target_dtype:")
+        add(lines, 12, "k = k.astype(target_dtype)")
         add(lines, 8, "scale_value = (1.0 / (q.shape[-1] ** 0.5)) if scale is None else float(scale)")
-        add(lines, 8, "scores = (q @ jnp.swapaxes(k, -1, -2)) * scale_value")
+        add(lines, 8, "bias = None")
+        add(lines, 8, "mask_bool = None")
         add(lines, 8, "if mask is not None:")
         add(lines, 12, "if getattr(mask, 'dtype', None) == jnp.bool_:")
-        add(lines, 16, "scores = jnp.where(mask, scores, jnp.finfo(scores.dtype).min)")
+        add(lines, 16, "mask_bool = mask")
         add(lines, 12, "else:")
-        add(lines, 16, "scores = scores + mask")
-        add(lines, 8, "return nn.softmax(scores, axis=-1) @ v")
+        add(lines, 16, "bias = mask")
+        add(lines, 8, "if extra_bias is not None:")
+        add(lines, 12, "bias = extra_bias if bias is None else bias + extra_bias")
+        add(lines, 8, "if q.shape[-1] != v.shape[-1]:")
+        add(lines, 12, "scores = jnp.matmul(q, jnp.swapaxes(k, -2, -1)) * scale_value")
+        add(lines, 12, "if bias is not None:")
+        add(lines, 16, "scores = scores + bias")
+        add(lines, 12, "if mask_bool is not None:")
+        add(lines, 16, "scores = jnp.where(mask_bool, scores, jnp.finfo(scores.dtype).min)")
+        add(lines, 12, "probs = jax.nn.softmax(scores, axis=-1)")
+        add(lines, 12, "return jnp.matmul(probs, v)")
+        add(lines, 8, "q_t = jnp.transpose(q, (0, 2, 1, 3))")
+        add(lines, 8, "k_t = jnp.transpose(k, (0, 2, 1, 3))")
+        add(lines, 8, "v_t = jnp.transpose(v, (0, 2, 1, 3))")
+        add(lines, 8, "out = jax.nn.dot_product_attention(q_t, k_t, v_t, bias=bias, mask=mask_bool, scale=scale_value)")
+        add(lines, 8, "return jnp.transpose(out, (0, 2, 1, 3))")
         add(lines, 4, "")
         add(lines, 4, "@staticmethod")
         add(lines, 4, "def _rope(x, traditional=False):")
         add(lines, 8, "del traditional")
         add(lines, 8, "raise NotImplementedError('__jax_rope lowering is not implemented yet')")
+        add(lines, 4, "")
+        add(lines, 4, "@staticmethod")
+        add(lines, 4, "def _rope_apply(x, sin, cos):")
+        add(lines, 8, "d = x.shape[-1]")
+        add(lines, 8, "x1 = x[..., :d // 2]")
+        add(lines, 8, "x2 = x[..., d // 2:]")
+        add(lines, 8, "rotated = jnp.concatenate([-x2, x1], axis=-1)")
+        add(lines, 8, "return (x * cos + rotated * sin).astype(x.dtype)")
         add(lines, 4, "")
         add(lines, 4, "@staticmethod")
         add(lines, 4, "def _split_sizes(x, sizes, axis):")
@@ -1471,8 +1501,17 @@ class _DirectJaxEmitter(_DirectTorchEmitter):
         add(lines, 12, "hit = (raw_next == eos.reshape((1, -1))).max(axis=1, keepdims=True)")
         add(lines, 12, "finished = finished | hit")
         add(lines, 12, "return next_id, finished")
-        add(lines, 8, "def _all_done(finished):")
-        add(lines, 12, "return finished is not None and bool(jax.device_get(jnp.all(finished)))")
+        add(lines, 8, "def _truncate_at_eos(out, eos, prompt_len):")
+        add(lines, 12, "if eos is None: return out")
+        add(lines, 12, "generated = out[:, prompt_len:]")
+        add(lines, 12, "is_eos = jnp.any(generated[..., None] == eos, axis=-1)")
+        add(lines, 12, "has_eos = is_eos.any(axis=1)")
+        add(lines, 12, "first_eos = jnp.argmax(is_eos.astype(jnp.int32), axis=1)")
+        add(lines, 12, "eos_found = bool(jax.device_get(has_eos[0]))")
+        add(lines, 12, "if eos_found:")
+        add(lines, 16, "truncate_at = int(jax.device_get(first_eos[0])) + 1")
+        add(lines, 16, "return out[:, :prompt_len + truncate_at]")
+        add(lines, 12, "return out")
         if is_cached_decoder:
             add(lines, 8, "out = input_ids")
             add(lines, 8, f"cache = kwargs.pop({cache_name!r}, None)")
@@ -1523,8 +1562,7 @@ class _DirectJaxEmitter(_DirectTorchEmitter):
                     add(lines, body_indent, "attention_mask = _append_static_attention_mask(attention_mask, next_id)")
                 else:
                     add(lines, body_indent, "attention_mask = jnp.concatenate([attention_mask, _ones_like_ids(next_id)], axis=1)")
-            add(lines, body_indent, "if _all_done(finished): break")
-            add(lines, loop_indent, "return out")
+            add(lines, loop_indent, "return _truncate_at_eos(out, eos, input_ids.shape[1])")
             if static_attention_capacity_symbol is not None:
                 add(lines, 8, "finally:")
                 add(lines, 12, "if __static_capacity_old is None:")
@@ -1551,8 +1589,7 @@ class _DirectJaxEmitter(_DirectTorchEmitter):
             add(lines, 12, "out = jnp.concatenate([out, next_id], axis=1)")
             if attention_name is not None:
                 add(lines, 12, "attention_mask = jnp.concatenate([attention_mask, _ones_like_ids(next_id)], axis=1)")
-            add(lines, 12, "if _all_done(finished): break")
-            add(lines, 8, "return out")
+            add(lines, 8, "return _truncate_at_eos(out, eos, input_ids.shape[1])")
             return
         add(lines, 8, "decoder_input_ids = kwargs.pop('decoder_input_ids', None)")
         add(lines, 8, "if decoder_input_ids is None:")
@@ -1713,6 +1750,18 @@ class _DirectJaxEmitter(_DirectTorchEmitter):
             if len(args) < 6:
                 raise ValueError("__jax_sdpa expects q, k, v, additive_mask, scale, enable_gqa")
             scale = f"float({args[4]})" if args[4] != "None" else "None"
+            if len(args) >= 7:
+                if scale == "None":
+                    return (
+                        f"self._sdpa("
+                        f"{args[0]}, {args[1]}, {args[2]}, "
+                        f"mask={args[3]}, scale=None, extra_bias={args[6]})"
+                    )
+                return (
+                    f"self._sdpa("
+                    f"{args[0]}, {args[1]}, {args[2]}, "
+                    f"mask={args[3]}, scale={scale}, extra_bias={args[6]})"
+                )
             if scale == "None":
                 return (
                     f"self._sdpa("
@@ -1755,8 +1804,8 @@ class _DirectJaxEmitter(_DirectTorchEmitter):
             eps = args[1] if len(args) > 1 else "1e-6"
             cast_float = args[3] if len(args) > 3 else "False"
             return (
-                f"(self._rms_norm({x}.astype(jnp.float32), None, float({eps})).astype({x}.dtype) "
-                f"if {cast_float} else self._rms_norm({x}, None, float({eps})))"
+                f"self._rms_norm({x}.astype(jnp.float32), None, float({eps}))"
+                f"if {cast_float} else self._rms_norm({x}, None, float({eps}))"
             )
         if primitive == "tensor_like":
             dtype = args[2] if len(args) > 2 else "None"
@@ -1765,7 +1814,7 @@ class _DirectJaxEmitter(_DirectTorchEmitter):
             dim = args[1] if len(args) > 1 else "-1"
             dtype = args[2] if len(args) > 2 else "None"
             if dtype == "None":
-                return f"nn.softmax({args[0]}, axis=int({dim}))"
+                return f"nn.softmax({args[0]}.astype(jnp.float32), axis=int({dim})).astype({args[0]}.dtype)"
             return f"nn.softmax({args[0]}.astype(self._dtype_from_name({dtype})) if {dtype} != None else {args[0]}, axis=int({dim}))"
         if primitive == "topk":
             return f"self._topk({args[0]}, {args[1]}, dim={args[2]}, largest={args[3]}, sorted_={args[4]})"
@@ -1808,7 +1857,14 @@ class _DirectJaxEmitter(_DirectTorchEmitter):
                 raise ValueError("conv1d expects x, weight, bias, stride, padding_left, padding_right, dilation, groups")
             return f"self._conv1d({args[0]}, {args[1]}, {args[2]}, {args[3]}, {args[4]}, {args[5]}, {args[6]}, {args[7]})"
         if primitive == "_jax_rope":
-            return f"self._rope({args[0]}, dims={args[0]}.shape[-1], traditional=bool({args[1]}))"
+            if len(args) >= 5:
+                return (
+                    f"(self._rope_apply({args[0]}, {args[3]}, {args[4]}), "
+                    f"self._rope_apply({args[1]}, {args[3]}, {args[4]}))"
+                )
+            if len(args) >= 4:
+                return f"self._rope_apply({args[0]}, {args[2]}, {args[3]})"
+            return f"self._rope({args[0]}, traditional=bool({args[1]}))"
         if primitive == "params_has_root":
             return f"any(k == {args[0]} or k.startswith(str({args[0]}) + '.') for k in self._flat_tensors)"
         if primitive.startswith("config_") or primitive in {"params_param"}:
@@ -1854,7 +1910,7 @@ class _DirectJaxEmitter(_DirectTorchEmitter):
             "zeros": lambda: f"jnp.zeros(tuple(int(x) for x in {args[1]}), dtype=(self._dtype_from_name({args[2] if len(args) > 2 else 'None'}) or {args[0]}.dtype))",
             "full": lambda: f"jnp.full(tuple(int(x) for x in {args[1]}), {args[2]}, dtype=(self._dtype_from_name({args[3] if len(args) > 3 else 'None'}) or {args[0]}.dtype))",
             "zeros_like": lambda: f"(lambda _x: jnp.zeros(_x.shape, dtype=_x.dtype))(self._value({args[0]}))",
-            "activations_tanh": lambda: f"jnp.tanh({args[0]})",
+            "activations_tanh": lambda: f"jnp.tanh({args[0]}.astype(jnp.float32)).astype({args[0]}.dtype)",
             "activations_silu": lambda: f"nn.sigmoid({args[0]}) * {args[0]}",
             "activations_sigmoid": lambda: f"nn.sigmoid({args[0]})",
             "activations_swiglu": lambda: f"(nn.sigmoid({args[0]}) * {args[0]} * {args[0]})",
@@ -1862,8 +1918,8 @@ class _DirectJaxEmitter(_DirectTorchEmitter):
             "activations_relu": lambda: f"jnp.maximum({args[0]}, 0)",
             "activations_relu2": lambda: f"(jnp.maximum({args[0]}, 0) * jnp.maximum({args[0]}, 0))",
             "activations_gelu": lambda: f"nn.gelu({args[0]}, approximate=False)",
-            "activations_gelu_new": lambda: f"(0.5 * {args[0]} * (1.0 + jnp.tanh(0.7978845608028654 * ({args[0]} + 0.044715 * {args[0]} * {args[0]} * {args[0]}))))",
-            "activations_gelu_pytorch_tanh": lambda: f"(0.5 * {args[0]} * (1.0 + jnp.tanh(0.7978845608028654 * ({args[0]} + 0.044715 * {args[0]} * {args[0]} * {args[0]}))))",
+            "activations_gelu_new": lambda: f"(lambda _x: (0.5 * _x * (1.0 + jnp.tanh(0.7978845608028654 * (_x + 0.044715 * _x * _x * _x)))).astype({args[0]}.dtype))({args[0]}.astype(jnp.float32))",
+            "activations_gelu_pytorch_tanh": lambda: f"(lambda _x: (0.5 * _x * (1.0 + jnp.tanh(0.7978845608028654 * (_x + 0.044715 * _x * _x * _x)))).astype({args[0]}.dtype))({args[0]}.astype(jnp.float32))",
             "activations_gegelu": lambda: f"self._gegelu({args[0]}, {args[1] if len(args) > 1 else 'None'})",
             "activations_xielu": lambda: f"self._xielu({args[0]}, {args[1]}, {args[2]}, {args[3]}, {args[4]})",
             "list_init": lambda: "[]",

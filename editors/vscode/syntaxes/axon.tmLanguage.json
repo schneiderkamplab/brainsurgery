@@ -1,0 +1,106 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "scopeName": "source.axon",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#pragmas" },
+    { "include": "#strings" },
+    { "include": "#path-literals" },
+    { "include": "#type-names" },
+    { "include": "#keywords" },
+    { "include": "#constants" },
+    { "include": "#numbers" },
+    { "include": "#function-names" },
+    { "include": "#operators" }
+  ],
+  "repository": {
+    "comments": {
+      "match": "--.*$",
+      "name": "comment.line.double-dash.axon"
+    },
+    "pragmas": {
+      "match": "\\{-#.*?#-\\}",
+      "name": "meta.pragma.axon"
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.axon",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            { "match": "\\\\.", "name": "constant.character.escape.axon" }
+          ]
+        },
+        {
+          "name": "string.quoted.single.axon",
+          "begin": "'",
+          "end": "'",
+          "patterns": [
+            { "match": "\\\\.", "name": "constant.character.escape.axon" }
+          ]
+        }
+      ]
+    },
+    "path-literals": {
+      "match": "@@?'(?:[^'\\\\]|\\\\.)*'|@@?(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+)(?:\\.(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+))*",
+      "name": "constant.other.path.axon"
+    },
+    "type-names": {
+      "match": "\\b(_T[0-9]+|Tensor|List|Path|Dim|Int|Float|Bool|String|Any|Null)\\b",
+      "name": "storage.type.axon"
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "match": "\\b(import|export|type)\\b",
+          "name": "keyword.control.import.axon"
+        },
+        {
+          "match": "\\b(if|then|else|for|do|return|yield|scope|carry|step)\\b",
+          "name": "keyword.control.axon"
+        },
+        {
+          "match": "\\b(and|or)\\b",
+          "name": "keyword.other.operator.axon"
+        }
+      ]
+    },
+    "constants": {
+      "match": "\\b(true|false|null)\\b",
+      "name": "constant.language.axon"
+    },
+    "numbers": {
+      "match": "(?<![A-Za-z_])-?[0-9]+(?:\\.[0-9]+)?(?:[eE][+-]?[0-9]+)?",
+      "name": "constant.numeric.axon"
+    },
+    "function-names": {
+      "patterns": [
+        {
+          "match": "[A-Za-z_][A-Za-z0-9_]*::[A-Za-z_][A-Za-z0-9_]*",
+          "name": "entity.name.function.axon"
+        },
+        {
+          "match": "[A-Za-z_][A-Za-z0-9_]*\\.[A-Za-z_][A-Za-z0-9_.]*",
+          "name": "entity.name.function.axon"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        { "match": ">>=", "name": "keyword.other.operator.axon" },
+        { "match": "::", "name": "keyword.other.operator.axon" },
+        { "match": "<-", "name": "keyword.other.operator.axon" },
+        { "match": "->", "name": "keyword.other.operator.axon" },
+        { "match": "[|]>", "name": "keyword.other.operator.axon" },
+        { "match": "\\.\\.", "name": "keyword.other.operator.axon" },
+        { "match": "==", "name": "keyword.other.operator.axon" },
+        { "match": "!=", "name": "keyword.other.operator.axon" },
+        { "match": "<=", "name": "keyword.other.operator.axon" },
+        { "match": ">=", "name": "keyword.other.operator.axon" },
+        { "match": "[<>+%/*=?:]", "name": "keyword.other.operator.axon" },
+        { "match": "-", "name": "keyword.other.operator.axon" }
+      ]
+    }
+  }
+}

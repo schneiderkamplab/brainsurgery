@@ -3,6 +3,7 @@ import Math sqrt
 import Tensor (concat, slice, softmax)
 export (
   attention,
+  attention_gqa_banded,
   attention_gqa_with_additive_mask,
   attention_with_additive_mask,
   attention_scaled,
@@ -161,6 +162,45 @@ attention_gqa_with_additive_mask q k v mask keep ?rel_bias=null ?scale=null ?sin
   out <- Tensor.matmul probs v_work
   out <- (out :: Tensor[B,KVH,H / KVH,Q,VD])
   out <- Tensor.reshape out shape=[B, H, Q, VD]
+  return fp32_compute ? (Tensor.cast out dtype="float32") : out
+
+
+-- Banded local GQA attention, one-to-one with opf's unfold kernel (the sdpa
+-- banded path): K/V are gathered into per-query windows of W = left + right + 1
+-- positions, so scores are [.., S, W] instead of [.., S, S]. band_idx/keep come
+-- from Masking.banded_mask_for_input; clamped duplicate slots are killed by
+-- keep, mirroring opf's zero-pad + mask. No rel_bias/softcap: positions are
+-- RoPE-applied before banding, which is what makes the window gather correct.
+attention_gqa_banded :: Tensor[B,H,S,HD] -> Tensor[B,KVH,S,HD] -> Tensor[B,KVH,S,VD] -> IdxTensor[S,W] -> Tensor[B,S,W] -> ?Float -> ?Tensor[B,H,S,1] -> ?Bool -> ?Bool -> Tensor[B,H,S,VD]
+attention_gqa_banded q k v band_idx keep ?scale=null ?sink_logits=null ?zero_masked_after_softmax=true ?fp32_compute=false = do
+  groups <- ((H / KVH) :: Dim)
+  sw <- ((S * W) :: Dim)
+  idx_col <- Tensor.reshape band_idx shape=[1, 1, sw, 1]
+  kwin <- Tensor.gather k (Tensor.expand idx_col shape=[B, KVH, sw, HD]) dim=2 |> Tensor.reshape shape=[B, KVH, S, W, HD]
+  vwin <- Tensor.gather v (Tensor.expand idx_col shape=[B, KVH, sw, VD]) dim=2 |> Tensor.reshape shape=[B, KVH, S, W, VD]
+  qg <- ((Tensor.reshape q shape=[B, KVH, groups, S, 1, HD]) :: Tensor[B,KVH,H / KVH,S,1,HD])
+  kg <- Tensor.unsqueeze kwin 2
+  vg <- Tensor.unsqueeze vwin 2
+  scale_eff <- (scale == null) ? (1.0 / sqrt HD) : scale
+  scores <- Tensor.matmul qg (Tensor.transpose kg dim1=4 dim2=5)
+  scores <- Tensor.reshape scores shape=[B, KVH, groups, S, W]
+  scores <- (scores :: Tensor[B,KVH,H / KVH,S,W])
+  scores <- scores * scale_eff
+  zero <- Tensor.zeros q shape=[B, 1, 1, S, W] dtype="float32"
+  keep_b <- Tensor.reshape keep shape=[B, 1, 1, S, W]
+  mask_g <- Tensor.where keep_b zero (Tensor.min_like zero)
+  probs_in <- scores + mask_g
+  probs_in <- (sink_logits == null) ? probs_in : attention_gqa_apply_sink_logits sink_logits groups probs_in
+  probs <- fp32_compute ? (softmax probs_in dim=-1 dtype="float32") : (softmax probs_in dim=-1)
+  probs <- slice probs dim=-1 start=0 end=W
+  probs <- (probs :: Tensor[B,KVH,H / KVH,S,W])
+  keep_g <- Tensor.expand keep_b shape=[B, KVH, groups, S, W]
+  probs <- zero_masked_after_softmax ? (Tensor.where keep_g probs 0) : probs
+  v_work <- fp32_compute ? (Tensor.cast vg dtype="float32") : vg
+  probs6 <- Tensor.reshape probs shape=[B, KVH, groups, S, 1, W]
+  out <- Tensor.matmul probs6 v_work
+  out <- (out :: Tensor[B,KVH,H / KVH,S,1,VD])
+  out <- Tensor.reshape out shape=[B, H, S, VD]
   return fp32_compute ? (Tensor.cast out dtype="float32") : out
 
 

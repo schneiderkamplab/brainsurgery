@@ -1788,24 +1788,24 @@ def _extract_cond_branch_helper_expr(
         elif isinstance(stmt, AxonScopeBind):
             local_bound.update(name for name in stmt.targets if name != "_")
 
+    names_locally_bound = local_bound - set(ctx.module_path_params)
+
     helper_free_names: list[str] = []
     helper_branch_stmts = branch_stmts
     helper_branch_expr = branch_expr
     for name in free_names:
-        # Captured names can share spelling with type dimension variables.
-        # Give the helper's value parameters separate lexical names so later
-        # type-dimension substitutions cannot capture them.
         helper_name_for_free = ctx.fresh(prefix=f"__arg_{name}")
         replacement = AxonExprName(name=helper_name_for_free)
         helper_branch_stmts = tuple(
             _substitute_name_stmt(stmt, name=name, replacement=replacement)
             for stmt in helper_branch_stmts
         )
-        helper_branch_expr = _substitute_name_expr(
-            helper_branch_expr,
-            name=name,
-            replacement=replacement,
-        )
+        if name not in names_locally_bound:
+            helper_branch_expr = _substitute_name_expr(
+                helper_branch_expr,
+                name=name,
+                replacement=replacement,
+            )
         helper_free_names.append(helper_name_for_free)
 
     helper_params = tuple(

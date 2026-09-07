@@ -1,4 +1,4 @@
-import Math (floor)
+import Math (clamp, floor)
 import Tensor (
   and,
   arange,
@@ -7,6 +7,7 @@ import Tensor (
   eq,
   expand,
   full,
+  gather,
   le,
   reshape,
   size,
@@ -14,6 +15,8 @@ import Tensor (
   where,
 )
 export (
+  banded_mask_for_input,
+  banded_positions_for_input,
   bidirectional_mask,
   bidirectional_mask_for_input,
   blocksparse_mask,
@@ -142,6 +145,41 @@ bidirectional_mask_for_input x K ?padding_mask=null ?window=null = if padding_ma
     bidirectional_mask_for_input_keep x K window=window
   else
     bidirectional_mask_for_input_masked x K padding_mask window=window
+
+
+-- === BANDED MASK ===
+-- Band position for query row t, slot w: pos[t, w] = t + w - left, with
+-- w in [0, left + right + 1). Out-of-range slots are clamped into [0, S); the
+-- paired validity mask kills the clamped duplicates, mirroring opf's
+-- zero-pad + unfold + mask (the pad content is irrelevant there too).
+banded_positions_for_input :: Tensor[B,Q] -> Dim -> Dim -> Dim -> (IdxTensor[S,W], Tensor[S,W])
+banded_positions_for_input x S left right = do
+  w <- ((left + right + 1) :: Dim)
+  row_ids <- arange x start=0 end=S |> reshape shape=[S, 1]
+  offsets <- arange x start=0 end=w |> reshape shape=[1, w]
+  pos <- (row_ids + offsets) - left
+  valid <- and (le 0 pos) (le pos (S - 1))
+  pos_c <- clamp pos min=0 max=(S - 1)
+  return (pos_c, valid)
+
+
+-- Clamped band positions plus the combined keep mask: geometric validity ∧
+-- key-side padding validity gathered at the clamped positions (queries are
+-- never masked, matching opf's key_valid unfold).
+banded_mask_for_input :: Tensor[B,Q] -> Dim -> Dim -> Dim -> ?Tensor[B,K] -> (IdxTensor[S,W], Tensor[B,S,W])
+banded_mask_for_input x S left right ?padding_mask=null = do
+  pos_c, valid <- banded_positions_for_input x S left right
+  w <- ((left + right + 1) :: Dim)
+  geo <- reshape valid shape=[1, S, w]
+  keep <- (padding_mask == null)
+    ? (expand geo shape=[B, S, w])
+    : do
+      sw <- ((S * w) :: Dim)
+      idx <- reshape pos_c shape=[1, sw] |> expand shape=[B, sw]
+      pad_keep <- cast padding_mask dtype="bool"
+      pad_win <- gather pad_keep idx -1 |> reshape shape=[B, S, w]
+      return and geo pad_win
+  return (pos_c, keep)
 
 
 -- === BLOCKSPARSE MASK ===

@@ -1,4 +1,4 @@
-{-# CHECKPOINTS "glm_4_5_air" #-}
+{-# CHECKPOINTS "zai-org/GLM-4.5-Air" #-}
 
 {-# TASK "causal_lm" #-}
 

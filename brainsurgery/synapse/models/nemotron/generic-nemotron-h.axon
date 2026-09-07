@@ -1,4 +1,4 @@
-{-# CHECKPOINTS ["nemotron3", "test/Nemotron-H-Test"] #-}
+{-# CHECKPOINTS ["nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", "test/Nemotron-H-Test"] #-}
 {-# TASK "causal_lm" #-}
 {-# PADDING_SIDE "right" #-}
 
